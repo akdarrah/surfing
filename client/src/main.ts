@@ -112,6 +112,7 @@ const net = new Net({
       case 'pickup': owned[m.weapon] = true; weapon = m.weapon; ammo[m.weapon] = WEAPONS[m.weapon].mag; banner(`Got the ${WEAPONS[m.weapon].name}!`, 1500); break;
       case 'split': say(`Stage ${m.stage} ✓ ${fmt(m.ms)}`); break;
       case 'invalid': say(`⚠️ run not counted: ${m.reason}`); break;
+      case 'notice': banner(m.text, 3000); openPromoForm(); break;
     }
   },
   onFx(shooter, w, origin, dir) {
@@ -241,7 +242,11 @@ function tick(now: number) {
     if (!touching(t, me.pos, maxs)) continue;
     if (t.type === 'start') { runStart = now; finished = false; }
     else if (t.type === 'teleport' && t.stage === stage) respawn(stage);
-    else if (t.type === 'checkpoint' && t.stage === stage + 1) { respawn(stage + 1); }
+    else if (t.type === 'checkpoint' && t.stage === stage + 1) {
+      // Let the server see us inside the checkpoint before we teleport away from it.
+      net.send(encodeState(me.pos, yaw, pitch, (me.ducked ? 1 : 0) | (weapon << 2)));
+      respawn(stage + 1);
+    }
     else if (t.type === 'end' && !finished && runStart !== null) { finished = true; say(`🏁 Finished in ${fmt(now - runStart)}!`); }
     else if (t.type === 'pickup' && !owned[t.weapon!]) { owned[t.weapon!] = true; weapon = t.weapon!; ammo[weapon] = WEAPONS[weapon].mag; }
   }

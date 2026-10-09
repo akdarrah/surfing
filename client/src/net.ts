@@ -1,8 +1,9 @@
 // Wire protocol. Hot paths are binary (little-endian); rare events are JSON text frames.
 // C->S  STATE 1: f32 x,y,z | u16 yaw | i16 pitch | u8 flags(ducked=1, teleported=2, weapon<<2)        18 bytes
 // C->S  SHOT  2: f32 origin xyz | f32 dir xyz | u32 viewTime(server ms) | u8 weapon                     30 bytes
-// S->C  SNAP  1: u32 time | u16 n | n * (u16 id | i16 x,y,z | u8 yaw | i8 pitch | u8 flags(ducked=1, dead=2, weapon<<2))
-// S->C  FX    2: u16 shooter | u8 weapon | f32 origin xyz | f32 dir xyz
+// S->C  frame = blocks back to back:
+//   SNAP 1: u32 time | u16 n | n * (u16 id | i16 x,y,z | u8 yaw | i8 pitch | u8 flags(ducked=1, dead=2, weapon<<2))
+//   FX   2: u16 shooter | u8 weapon | f32 origin xyz | f32 dir xyz   (28 bytes)
 import type { V3 } from './physics.ts';
 
 export const MSG_STATE = 1, MSG_SHOT = 2;
@@ -76,30 +77,35 @@ export class Net {
     return r;
   }
 
+  // A frame is a run of blocks: snapshots (one per nearby cell, or the far view) and shot tracers.
   private binary(b: DataView) {
-    const type = b.getUint8(0);
-    if (type === 1) {
-      const t = b.getUint32(1, true);
-      // Track the newest packet: its arrival bounds the clock offset from above, so creep toward it slowly.
-      const sample = t - performance.now();
-      this.offset = sample > this.offset ? sample : this.offset - 0.02;
-      const n = b.getUint16(5, true);
-      for (let i = 0, o = 7; i < n; i++, o += 11) {
-        const r = this.remote(b.getUint16(o, true));
-        const snap = {
-          t,
-          pos: [b.getInt16(o + 2, true), b.getInt16(o + 4, true), b.getInt16(o + 6, true)] as V3,
-          yaw: (b.getUint8(o + 8) / 256) * TAU,
-          pitch: (b.getInt8(o + 9) / 127) * (Math.PI / 2),
-          flags: b.getUint8(o + 10),
-        };
-        const last = r.snaps[r.snaps.length - 1];
-        if (!last || t > last.t) r.snaps.push(snap);
-        if (r.snaps.length > 30) r.snaps.shift();
-      }
-    } else if (type === 2) {
-      const f = (i: number) => b.getFloat32(i, true);
-      this.h.onFx(b.getUint16(1, true), b.getUint8(3), [f(4), f(8), f(12)], [f(16), f(20), f(24)]);
+    for (let o = 0; o < b.byteLength; ) {
+      const type = b.getUint8(o);
+      if (type === 1) {
+        const t = b.getUint32(o + 1, true);
+        // The newest packet bounds the clock offset from above, so creep toward it slowly.
+        const sample = t - performance.now();
+        this.offset = sample > this.offset ? sample : this.offset - 0.02;
+        const n = b.getUint16(o + 5, true);
+        o += 7;
+        for (let i = 0; i < n; i++, o += 11) {
+          const r = this.remote(b.getUint16(o, true));
+          const snap = {
+            t,
+            pos: [b.getInt16(o + 2, true), b.getInt16(o + 4, true), b.getInt16(o + 6, true)] as V3,
+            yaw: (b.getUint8(o + 8) / 256) * TAU,
+            pitch: (b.getInt8(o + 9) / 127) * (Math.PI / 2),
+            flags: b.getUint8(o + 10),
+          };
+          const last = r.snaps[r.snaps.length - 1];
+          if (!last || t > last.t) r.snaps.push(snap);
+          if (r.snaps.length > 30) r.snaps.shift();
+        }
+      } else if (type === 2) {
+        const f = (i: number) => b.getFloat32(o + i, true);
+        this.h.onFx(b.getUint16(o + 1, true), b.getUint8(o + 3), [f(4), f(8), f(12)], [f(16), f(20), f(24)]);
+        o += 28;
+      } else return;
     }
   }
 }
@@ -107,7 +113,8 @@ export class Net {
 // Interpolated pose of a remote at server time t; null if we have nothing recent.
 export function samplePose(r: Remote, t: number) {
   const s = r.snaps;
-  if (!s.length || t - s[s.length - 1].t > 2000) return null;
+  // Far boats only refresh every few seconds on a busy server, so keep showing them a while.
+  if (!s.length || t - s[s.length - 1].t > 12000) return null;
   let i = s.length - 1;
   while (i > 0 && s[i - 1].t > t) i--;
   const a = s[Math.max(0, i - 1)], b = s[i];
