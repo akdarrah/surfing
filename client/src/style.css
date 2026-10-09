@@ -1,0 +1,28 @@
+html, body { margin: 0; height: 100%; overflow: hidden; background: #cfe8ff; font-family: "Comic Sans MS", "Chalkboard SE", system-ui, sans-serif; }
+#game canvas { display: block; }
+#hud { position: fixed; inset: 0; pointer-events: none; color: #fff; text-shadow: 0 2px 0 #3d2c8d, 0 0 6px #3d2c8d; }
+#crosshair { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 2px #3d2c8d; }
+#crosshair.hit { border-color: #ff4d6d; transform: scale(1.6); }
+#speed { position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); font-size: 40px; }
+#speed::after { content: " u/s"; font-size: 18px; }
+#timer { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 28px; }
+#stage { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); font-size: 18px; }
+#hp { position: absolute; bottom: 20px; left: 24px; font-size: 30px; }
+#ammo { position: absolute; bottom: 20px; right: 24px; font-size: 24px; text-align: right; }
+#round { position: absolute; top: 14px; right: 20px; font-size: 18px; text-align: right; }
+#banner { position: absolute; top: 28%; width: 100%; text-align: center; font-size: 44px; }
+#promo { position: absolute; top: 14px; left: 20px; max-width: 32ch; font-size: 15px; background: rgba(61,44,141,.55); padding: 8px 12px; border-radius: 12px; pointer-events: auto; }
+#promo a { color: #ffd6e8; cursor: pointer; text-decoration: underline; }
+#feed { position: absolute; top: 90px; right: 20px; font-size: 15px; text-align: right; }
+#board { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(61,44,141,.85); padding: 18px 26px; border-radius: 16px; font-size: 16px; min-width: 420px; }
+#board table { width: 100%; } #board td { padding: 2px 8px; }
+#menu, #promoForm { position: fixed; inset: 0; margin: auto; width: min(560px, 92vw); height: fit-content; background: #fffaf0; color: #3d2c8d; border-radius: 22px; padding: 24px 30px; box-shadow: 0 10px 0 #3d2c8d; text-align: center; }
+#menu h1 { margin: 0; font-size: 48px; } .sub { margin-top: 4px; }
+#menu label { display: block; margin: 10px 0; }
+input { font: inherit; padding: 6px 10px; border: 3px solid #3d2c8d; border-radius: 10px; width: 60%; }
+#sens { width: 80px; }
+button { font: inherit; font-size: 22px; padding: 10px 26px; margin: 12px 0; background: #f15bb5; color: #fff; border: 0; border-radius: 14px; box-shadow: 0 5px 0 #9b2c74; cursor: pointer; }
+.keys { font-size: 14px; line-height: 1.8; }
+kbd { background: #3d2c8d; color: #fff; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+#promoForm input { display: block; width: 90%; margin: 8px auto; }
+#share { display: block; color: #00a5d8; }

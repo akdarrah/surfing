@@ -2,8 +2,8 @@
 // Each stage is a lane along +y. Stage end platforms teleport you to the next stage start.
 import { writeFileSync } from 'node:fs';
 
-const RAMP = ['#fdfbf7', '#f6efe4'];
-const PLATFORM = '#ffd6a5';
+const RAMP = ['#ffc8dd', '#bde0fe', '#caffbf', '#fdffb6', '#cdb4db', '#ffd6a5'];
+const PLATFORM = '#fff1c1';
 
 function box(min, max, color = PLATFORM) {
   const v = [];
@@ -44,7 +44,7 @@ function cloudHarbor() {
     sides.forEach((side, i) => {
       const length = 2560 + (i % 2) * 512;
       const r = { x: lx + side * 280, y, length, top };
-      brushes.push(ramp(r, RAMP[i % 2]));
+      brushes.push(ramp(r, RAMP[(s + i) % RAMP.length]));
       minZ = Math.min(minZ, top - 512 - 640);
       // Risky pickups: just above a ridge near its end (stage 2), and a far-off side ledge (stage 4).
       if (s === 1 && i === 2) {
