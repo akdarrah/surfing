@@ -11,7 +11,7 @@ Counter-Strike surf in the browser, except you're a little sailboat in the sky. 
 ```sh
 cd client && npm install && cd ..
 node levels/build.mjs                                    # regenerate levels/*.json after editing build.mjs
-(cd server && cargo run --release)                       # game server on :8080 (serves client/dist too)
+cargo run --release --manifest-path server/Cargo.toml  # from the repo root: game server on :8080 (serves client/dist too)
 (cd client && npm run dev)                               # http://localhost:5173, proxies /ws to :8080
 ```
 
@@ -30,7 +30,7 @@ Tests:
 |---|---|
 | `A` / `D` + mouse | surf: hold strafe *into* the ramp and steer with the mouse. Don't hold `W` on a ramp |
 | `Space` | jump (autobhop) |
-| `Ctrl` or `C` | duck |
+| `C` or `Ctrl` | duck (on Windows/Linux, Ctrl+W closes the tab, so prefer `C` or play full-screen) |
 | `F` | restart the current stage (CS `!r`) |
 | Click / `R` / `1` `2` `3` | shoot / reload / switch weapon |
 | `V` | first/third person |

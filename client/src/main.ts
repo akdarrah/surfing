@@ -99,6 +99,7 @@ const net = new Net({
       case 'hit':
         hp = m.hp;
         me.vel = add(me.vel, m.kb);
+        if (hp <= 0 && !deadUntil) deadUntil = performance.now() + 2000; // in case the 'sunk' frame got dropped
         world.puff(add(me.pos, [0, 0, 40]), 20, performance.now() / 1000, 0xff4d6d, 0.4);
         break;
       case 'sunk':

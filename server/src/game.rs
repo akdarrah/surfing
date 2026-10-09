@@ -622,6 +622,7 @@ impl Game {
             }
         }
 
+        // ponytail: rays ignore level geometry (no shooting through ramps check); add a brush ray test if cover matters.
         // Tracers ride along with the next snapshot to everyone near the shooter.
         self.fx.entry(cell_of(origin)).or_default().extend_from_slice(&proto::fx(id, w as u8, origin, dir));
     }
@@ -809,6 +810,29 @@ mod tests {
         g.handle(Inbound::Bin(b, sb, state(sp, 0)));
         g.handle(Inbound::Bin(b, sb, state([sp[0], sp[1] + 20000.0, sp[2]], 0)));
         assert!(texts(&mut rb).iter().any(|m| m["t"] == "invalid" && m["reason"] == "moved impossibly fast"));
+    }
+
+    #[test]
+    fn a_legit_run_advances_stages_through_real_packets() {
+        let mut g = game();
+        let (a, sa, mut ra) = join(&mut g, "Legit");
+        let sp = g.level.spawns[0].pos;
+        let cp = g.level.triggers.iter().find(|t| t.kind == Kind::Checkpoint && t.stage == Some(1)).unwrap();
+        let (cx, cy, cz, sp1) = ((cp.min[0] + cp.max[0]) / 2.0, cp.min[1], cp.min[2] + 10.0, g.level.spawns[1].pos);
+        let mid = |y: f32| [cx, y, cz];
+        g.handle(Inbound::Bin(a, sa, state(sp, 0)));
+        g.handle(Inbound::Bin(a, sa, state([sp[0], sp[1] + 300.0, sp[2]], 0))); // leave the start zone: clock starts
+        // Surf along (teleport to the platform's approach is fine as long as speed stays plausible)...
+        let p = g.players[a as usize].as_mut().unwrap();
+        p.pos = mid(cy - 200.0);
+        // ...cross into the checkpoint, then the client's pre-teleport flush, then the teleport to stage 2's spawn.
+        g.handle(Inbound::Bin(a, sa, state(mid(cy + 40.0), 0)));
+        g.handle(Inbound::Bin(a, sa, state(mid(cy + 60.0), 0)));
+        g.handle(Inbound::Bin(a, sa, state(sp1, 2)));
+        let p = g.players[a as usize].as_ref().unwrap();
+        assert_eq!(p.stage, 1);
+        assert!(p.valid, "{:?}", texts(&mut ra));
+        assert!(texts(&mut ra).iter().any(|m| m["t"] == "split" && m["stage"] == 1));
     }
 
     #[test]
