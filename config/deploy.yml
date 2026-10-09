@@ -1,0 +1,29 @@
+# Second Kamal service on the blog's droplet; kamal-proxy routes by host and passes WebSockets through.
+service: surfing
+image: surfing
+
+servers:
+  web:
+    - 142.93.201.166
+
+proxy:
+  ssl: true
+  host: surf.akdarrah.com
+  app_port: 80
+  healthcheck:
+    path: /up
+
+registry:
+  server: localhost:5555
+
+builder:
+  arch: amd64
+
+env:
+  clear:
+    DATA_DIR: /data
+  secret:
+    - ADMIN_TOKEN
+
+volumes:
+  - "surfing_data:/data"
