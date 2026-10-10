@@ -10,11 +10,11 @@
   <div id="game"></div>
   <div id="hud" hidden>
     <div id="crosshair"></div>
-    <div id="speed">0</div>
+    <div id="speed" class="box">0</div>
     <div id="timer"></div>
     <div id="stage"></div>
-    <div id="hp"></div>
-    <div id="ammo"></div>
+    <div id="hp" class="box"></div>
+    <div id="ammo" class="box"></div>
     <div id="round"></div>
     <div id="banner" hidden></div>
     <div id="promo" hidden></div>
@@ -22,24 +22,34 @@
     <div id="board" hidden></div>
   </div>
   <div id="menu">
-    <h1>⛵ Sky Surf</h1>
-    <p class="sub">CS surf, but you're a little sailboat in the sky.</p>
-    <label>Captain name <input id="name" maxlength="24" /></label>
-    <label>Sensitivity <input id="sens" type="number" step="0.1" min="0.1" max="20" /></label>
-    <button id="play">Click to sail</button>
-    <div class="keys">
-      <b>Surf:</b> hold <kbd>A</kbd>/<kbd>D</kbd> into the ramp and steer with the mouse. Don't hold <kbd>W</kbd> on a ramp.<br />
-      <kbd>Space</kbd> jump · <kbd>C</kbd>/<kbd>Ctrl</kbd> duck · <kbd>F</kbd> restart stage · <kbd>V</kbd> camera · <kbd>Tab</kbd> scores<br />
-      <kbd>Click</kbd> shoot · <kbd>R</kbd> reload · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> weapons (grab 💎 upgrades on risky lines)<br />
-      First boat to the lighthouse wins the round and paints the giant sail.
+    <div class="hazard"></div>
+    <h1>SKY SURF</h1>
+    <p class="sub">CS surf. Sky privateers. Winners tag the map forever.</p>
+    <div class="grid">
+      <label>NAME <input id="name" maxlength="24" /></label>
+      <label>SPONSOR <input id="sponsor" maxlength="32" placeholder="who's backing you?" /></label>
+      <label class="pick">FLAG <img id="flagPreview" alt="" /><input id="flagFile" type="file" accept="image/*" /></label>
+      <label class="pick">SPRAY <img id="sprayPreview" alt="" /><input id="sprayFile" type="file" accept="image/*" /></label>
+      <label>SENSITIVITY <input id="sens" type="number" step="0.1" min="0.1" max="20" /></label>
+      <label class="check"><input id="hideImages" type="checkbox" /> HIDE PLAYER IMAGES</label>
     </div>
+    <button id="play">DEPLOY</button>
+    <div class="keys">
+      <b>SURF</b> hold <kbd>A</kbd>/<kbd>D</kbd> into the ramp, steer with the mouse, never hold <kbd>W</kbd> on a ramp<br />
+      <kbd>SPACE</kbd> jump · <kbd>C</kbd> duck · <kbd>F</kbd> restart stage · <kbd>T</kbd> spray · <kbd>V</kbd> camera · <kbd>TAB</kbd> scores<br />
+      <kbd>CLICK</kbd> shoot · <kbd>R</kbd> reload · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> weapons, upgrades sit on the risky lines<br />
+      First to the watchtower takes the round, paints the sail, and tags the map until someone paints over them.
+    </div>
+    <div id="players"></div>
   </div>
   <form id="promoForm" hidden>
-    <h2>🏆 You won! Paint the sail.</h2>
-    <input id="promoText" maxlength="80" placeholder="Your message (80 chars)" required />
-    <input id="promoUrl" maxlength="200" placeholder="https://optional.link" />
-    <button>Paint it</button>
-    <a id="share" target="_blank" rel="noopener">Share my win</a>
+    <div class="hazard"></div>
+    <h2>YOU TOOK THE ROUND</h2>
+    <p>Paint the big sail. Everyone sees it until the next winner.</p>
+    <input id="promoText" maxlength="80" placeholder="your message (80 chars)" required />
+    <input id="promoUrl" maxlength="200" placeholder="https://your.link (optional)" />
+    <button>PAINT IT</button>
+    <a id="share" target="_blank" rel="noopener">SHARE ON X →</a>
   </form>
   <script type="module" src="/src/main.ts"></script>
 </body>

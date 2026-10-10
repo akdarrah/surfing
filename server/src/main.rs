@@ -1,13 +1,15 @@
 mod filter;
 mod game;
+mod images;
 mod level;
 mod proto;
 
 use axum::{
     Router,
-    extract::{ConnectInfo, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    Json,
+    extract::{ConnectInfo, Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +22,7 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 #[derive(Clone)]
 struct App {
     tx: mpsc::Sender<Inbound>,
+    images: images::Store,
     admin_token: Option<String>,
 }
 
@@ -30,18 +33,23 @@ fn env(k: &str, default: &str) -> String {
 #[tokio::main]
 async fn main() {
     let level = level::Level::load(&env("LEVEL", "levels/cloud-harbor.json"));
-    let data_dir = Some(env("DATA_DIR", "data").into());
+    let data_dir: std::path::PathBuf = env("DATA_DIR", "data").into();
     let max_per_ip = env("MAX_CONN_PER_IP", "8").parse().unwrap_or(8);
+    let images = images::Store::new(Some(data_dir.join("img")));
     let (tx, rx) = mpsc::channel(65536);
-    tokio::spawn(game::Game::new(level, data_dir, max_per_ip).run(rx));
+    tokio::spawn(game::Game::new(level, Some(data_dir), max_per_ip, images.clone()).run(rx));
 
-    let app = App { tx, admin_token: std::env::var("ADMIN_TOKEN").ok().filter(|t| t.len() >= 16) };
+    let app = App { tx, images, admin_token: std::env::var("ADMIN_TOKEN").ok().filter(|t| t.len() >= 16) };
     let frame_ancestors = env("FRAME_ANCESTORS", "'self' https://akdarrah.com https://www.akdarrah.com");
     let router = Router::new()
         .route("/ws", get(ws))
         .route("/up", get(|| async { "ok" }))
         .route("/admin/clear-promo", post(clear_promo))
         .route("/admin/ban", post(ban))
+        .route("/admin/clear-images", post(clear_images))
+        .route("/admin/tags", get(list_tags))
+        .route("/admin/tags/{id}/remove", post(remove_tag))
+        .route("/img/{hash}", get(image))
         .fallback_service(ServeDir::new(env("STATIC_DIR", "client/dist")))
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -67,7 +75,7 @@ fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
 
 async fn ws(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(addr): ConnectInfo<SocketAddr>, State(app): State<App>) -> impl IntoResponse {
     let ip = client_ip(&headers, addr);
-    ws.max_message_size(4096).on_upgrade(move |socket| conn(socket, ip, app))
+    ws.max_message_size(images::MAX_BYTES + 1024).on_upgrade(move |socket| conn(socket, ip, app))
 }
 
 async fn conn(socket: WebSocket, ip: String, app: App) {
@@ -135,5 +143,45 @@ async fn ban(State(app): State<App>, headers: HeaderMap, axum::extract::Query(q)
     }
     let Some(ip) = q.get("ip").filter(|ip| !ip.is_empty()) else { return StatusCode::BAD_REQUEST };
     let _ = app.tx.send(Inbound::Admin(Admin::Ban(ip.clone()))).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn image(State(app): State<App>, Path(hash): Path<String>) -> Response {
+    match app.images.get(&hash) {
+        Some((bytes, mime)) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn clear_images(State(app): State<App>, headers: HeaderMap) -> StatusCode {
+    if !authorized(&app, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let _ = app.tx.send(Inbound::Admin(Admin::ClearImages)).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn list_tags(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (tx, rx) = oneshot::channel();
+    let _ = app.tx.send(Inbound::Admin(Admin::ListTags(tx))).await;
+    rx.await.map(Json).map_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response(), IntoResponse::into_response)
+}
+
+async fn remove_tag(State(app): State<App>, headers: HeaderMap, Path(id): Path<u32>) -> StatusCode {
+    if !authorized(&app, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let _ = app.tx.send(Inbound::Admin(Admin::RemoveTag(id))).await;
     StatusCode::NO_CONTENT
 }

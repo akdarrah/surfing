@@ -1,6 +1,6 @@
-# ⛵ Sky Surf
+# 🏴‍☠️ Sky Surf
 
-Counter-Strike surf in the browser, except you're a little sailboat in the sky. Strafe along steep ramps, fly between them, shoot other boats, and race to the lighthouse. The first boat there wins the round and gets to paint the giant sail that everyone sees.
+Counter-Strike surf in the browser, with sky privateers. Strafe along steep ramps, fly between them, shoot other boats, and race to the watchtower. The first boat there takes the round, paints the giant sail, and **tags the map permanently** with their spray, until another winner paints over it.
 
 - **Client:** TypeScript + Three.js + Vite. The movement code is ported from Source's `gamemovement.cpp`, and collision uses Quake-style AABB-vs-convex-brush traces.
 - **Server:** Rust (tokio + axum). One game-loop task owns all state; sockets talk to it over channels.
@@ -33,10 +33,17 @@ Tests:
 | `C` or `Ctrl` | duck (on Windows/Linux, Ctrl+W closes the tab, so prefer `C` or play full-screen) |
 | `F` | restart the current stage (CS `!r`) |
 | Click / `R` / `1` `2` `3` | shoot / reload / switch weapon |
+| `T` | spray (your spray image, CS-style, one live spray each, 15 s cooldown) |
 | `V` | first/third person |
 | `Tab` | leaderboard |
 
 Mouse sensitivity uses CS units (`sensitivity × 0.022°` per count), so your CS sensitivity carries over.
+
+## Profiles, sprays and tags
+
+On the menu you set a **name**, a **sponsor** (shown under your name and on the scoreboard), a **flag** image (flown as the banner on your mast) and a **spray** image. Images are cropped and re-encoded in the browser (flag 128×80 JPEG, spray 128×128 PNG, ≤48 KB), uploaded over the WebSocket, and served content-addressed from `/img/<hash>`. Clients fetch them only for boats and sprays they actually see. `Tab` shows everyone online with flag, name, sponsor, stage and K/D.
+
+**Winners tag the map.** During the intermission the winner aims at any surface and presses `T`, and their spray goes on as a permanent gold-framed tag with a name plate. Tags persist in `data/state.json` plus `data/img/`. A new tag on the same spot paints over the old one, with a cap of 64. Sharing `https://surf.akdarrah.com/?tag=<id>` opens the game looking straight at that tag.
 
 ## How a round works
 
@@ -46,7 +53,7 @@ Weapons: Popgun (start) → Blunderbuss (shotgun, 💎 above a stage-2 ridge) �
 
 ## Architecture notes
 
-- **Movement is client-authoritative** for perfect feel. The server validates runs: checkpoint order, a max-speed displacement check (`3500·√3 u/s`), and teleports only to stage spawns you've earned. It also measures run times itself.
+- **Movement is client-authoritative** for perfect feel. The server validates runs: checkpoint order, a max-speed displacement check (`3500·√3 u/s`), teleports only to stage spawns you've earned, and a per-level `minRunMs` floor (the course's forward distance at the 3500 u/s axis cap, so no legit run can beat it). It also measures run times itself. A modified client can still fake a run inside those limits; server-authoritative movement would close that.
 - **Hits are server-authoritative with lag compensation.** The server rewinds every boat to the time the shooter was seeing (≤1 s) and raycasts hulls.
 - **Interest management:** players are bucketed into 2048-unit cells. Each cell's 3×3×3 neighbourhood is encoded once per tick (20 Hz), capped at 96 boats with a rotating window, and shared by everyone in that cell. Shot tracers ride in the same frame. A 256-boat rotating "far view" goes out once a second.
 - **Slow clients drop frames instead of buffering** (bounded per-socket queues). Inbound traffic is token-bucket limited per socket.
@@ -84,11 +91,17 @@ Then point the client import (`client/src/main.ts`) and the server's `LEVEL` env
    <p><a href="https://surf.akdarrah.com/">Play full-screen ↗</a></p>
    ```
 
-Moderation:
+Moderation. Players can also hide all player images or mute individuals from the pause menu.
 
 ```sh
-curl -X POST -H "Authorization: Bearer $SURFING_ADMIN_TOKEN" https://surf.akdarrah.com/admin/clear-promo
-curl -X POST -H "Authorization: Bearer $SURFING_ADMIN_TOKEN" "https://surf.akdarrah.com/admin/ban?ip=1.2.3.4"
+A="Authorization: Bearer $SURFING_ADMIN_TOKEN"
+curl -X POST -H "$A" https://surf.akdarrah.com/admin/clear-promo
+curl -X POST -H "$A" "https://surf.akdarrah.com/admin/ban?ip=1.2.3.4"   # kicks, bans, and removes their tags
+curl -X POST -H "$A" https://surf.akdarrah.com/admin/clear-images       # resets all flags and live sprays
+curl -H "$A" https://surf.akdarrah.com/admin/tags                       # review permanent tags (image URL, name, sponsor, IP)
+curl -X POST -H "$A" https://surf.akdarrah.com/admin/tags/7/remove
 ```
+
+Permanent tags are the biggest moderation surface (a 128 px image can still carry a QR code), so check `/admin/tags` now and then.
 
 Leaderboard, current promo, and bans persist in the `surfing_data` volume (`/data/state.json`).

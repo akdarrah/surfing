@@ -33,6 +33,9 @@ pub struct Trigger {
 #[derive(Deserialize)]
 pub struct Level {
     pub name: String,
+    // Fastest believable full run; anything quicker is a modified client.
+    #[serde(rename = "minRunMs", default)]
+    pub min_run_ms: u32,
     pub spawns: Vec<Spawn>,
     pub triggers: Vec<Trigger>,
 }

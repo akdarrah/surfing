@@ -19,6 +19,14 @@ export function encodeState(pos: V3, yaw: number, pitch: number, flags: number) 
   return b.buffer;
 }
 
+// C->S  FLAG 3 / SPRAY 4: raw JPEG/PNG bytes (<= 48 KB), already resized client-side.
+export function encodeImage(kind: 3 | 4, img: Uint8Array) {
+  const b = new Uint8Array(img.length + 1);
+  b[0] = kind;
+  b.set(img, 1);
+  return b.buffer;
+}
+
 export function encodeShot(origin: V3, dir: V3, viewTime: number, weapon: number) {
   const b = new DataView(new ArrayBuffer(30));
   b.setUint8(0, MSG_SHOT);
@@ -46,12 +54,12 @@ export class Net {
 
   constructor(private h: Handlers) {}
 
-  connect(name: string) {
+  connect(hello: () => object) {
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
     const ws = (this.ws = new WebSocket(url));
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { this.connected = true; ws.send(JSON.stringify({ t: 'hello', name })); };
-    ws.onclose = () => { this.connected = false; this.remotes.clear(); setTimeout(() => this.connect(name), 3000); };
+    ws.onopen = () => { this.connected = true; ws.send(JSON.stringify({ t: 'hello', ...hello() })); };
+    ws.onclose = () => { this.connected = false; this.remotes.clear(); setTimeout(() => this.connect(hello), 3000); };
     ws.onmessage = e => (typeof e.data === 'string' ? this.json(JSON.parse(e.data)) : this.binary(new DataView(e.data)));
   }
 

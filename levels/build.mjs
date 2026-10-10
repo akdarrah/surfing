@@ -2,8 +2,8 @@
 // Each stage is a lane along +y. Stage end platforms teleport you to the next stage start.
 import { writeFileSync } from 'node:fs';
 
-const RAMP = ['#ffc8dd', '#bde0fe', '#caffbf', '#fdffb6', '#cdb4db', '#ffd6a5'];
-const PLATFORM = '#fff1c1';
+const RAMP = ['#5a616b', '#6b5646', '#4d5a52', '#74685a', '#525a66', '#6a4c3c'];
+const PLATFORM = '#7d7b76';
 
 function box(min, max, color = PLATFORM) {
   const v = [];
@@ -53,7 +53,7 @@ function cloudHarbor() {
       }
       if (s === 3 && i === 1) {
         const lx2 = lx + side * 1400, ly = y + length + 200, lz = top - 700;
-        brushes.push(box([lx2 - 160, ly - 160, lz - 64], [lx2 + 160, ly + 160, lz], '#caffbf'));
+        brushes.push(box([lx2 - 160, ly - 160, lz - 64], [lx2 + 160, ly + 160, lz], '#5a4a3a'));
         triggers.push(trig('pickup', [lx2 - 48, ly - 48, lz], [lx2 + 48, ly + 48, lz + 96], { weapon: 2 }));
       }
       y += length + 448;
@@ -63,15 +63,19 @@ function cloudHarbor() {
     brushes.push(box([lx - 512, y, pz - 128], [lx + 512, y + 1024, pz]));
     const last = s === stages.length - 1;
     if (last) {
-      // Lighthouse on the finish island.
-      brushes.push(box([lx - 64, y + 704, pz], [lx + 64, y + 832, pz + 512], '#ff6b6b'));
-      brushes.push(box([lx - 96, y + 672, pz + 512], [lx + 96, y + 864, pz + 576], '#ffffff'));
+      // Watchtower on the finish island, red beacon on top.
+      brushes.push(box([lx - 64, y + 704, pz], [lx + 64, y + 832, pz + 512], '#1c1d21'));
+      brushes.push(box([lx - 96, y + 672, pz + 512], [lx + 96, y + 864, pz + 544], '#2a2b30'));
+      brushes.push(box([lx - 32, y + 736, pz + 544], [lx + 32, y + 800, pz + 608], '#d7261e'));
     }
     triggers.push(trig(last ? 'end' : 'checkpoint', [lx - 512, y + 200, pz], [lx + 512, y + 1024, pz + 256], { stage: s + 1 }));
     minZ = Math.min(minZ, pz - 128);
     triggers.push(trig('teleport', [lx - 3000, -4000, -20000], [lx + 3000, y + 6000, minZ - 600], { stage: s }));
   });
-  return { name: 'cloud-harbor', spawns, brushes, triggers };
+  // Provable floor: each stage needs at least its forward distance at the 3500 u/s per-axis velocity cap.
+  const goals = triggers.filter(t => t.type === 'checkpoint' || t.type === 'end');
+  const minRunMs = Math.floor(spawns.reduce((ms, sp, i) => ms + ((goals.find(t => t.stage === i + 1).min[1] - sp.pos[1]) / 3500) * 1000, 0));
+  return { name: 'cloud-harbor', minRunMs, spawns, brushes, triggers };
 }
 
 writeFileSync(new URL('./cloud-harbor.json', import.meta.url), JSON.stringify(cloudHarbor()));

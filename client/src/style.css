@@ -1,28 +1,64 @@
-html, body { margin: 0; height: 100%; overflow: hidden; background: #cfe8ff; font-family: "Comic Sans MS", "Chalkboard SE", system-ui, sans-serif; }
+:root { --amber: #ffb000; --hazard: #f2b705; --ink: #0e0f12; --bone: #e8e2d0; --font: Impact, "Arial Narrow Bold", "Arial Black", sans-serif; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ink); font-family: var(--font); letter-spacing: .5px; }
 #game canvas { display: block; }
-#hud { position: fixed; inset: 0; pointer-events: none; color: #fff; text-shadow: 0 2px 0 #3d2c8d, 0 0 6px #3d2c8d; }
-#crosshair { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 2px #3d2c8d; }
-#crosshair.hit { border-color: #ff4d6d; transform: scale(1.6); }
-#speed { position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); font-size: 40px; }
-#speed::after { content: " u/s"; font-size: 18px; }
-#timer { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 28px; }
-#stage { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); font-size: 18px; }
-#hp { position: absolute; bottom: 20px; left: 24px; font-size: 30px; }
-#ammo { position: absolute; bottom: 20px; right: 24px; font-size: 24px; text-align: right; }
-#round { position: absolute; top: 14px; right: 20px; font-size: 18px; text-align: right; }
-#banner { position: absolute; top: 28%; width: 100%; text-align: center; font-size: 44px; }
-#promo { position: absolute; top: 14px; left: 20px; max-width: 32ch; font-size: 15px; background: rgba(61,44,141,.55); padding: 8px 12px; border-radius: 12px; pointer-events: auto; }
-#promo a { color: #ffd6e8; cursor: pointer; text-decoration: underline; }
-#feed { position: absolute; top: 90px; right: 20px; font-size: 15px; text-align: right; }
-#board { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(61,44,141,.85); padding: 18px 26px; border-radius: 16px; font-size: 16px; min-width: 420px; }
-#board table { width: 100%; } #board td { padding: 2px 8px; }
-#menu, #promoForm { position: fixed; inset: 0; margin: auto; width: min(560px, 92vw); height: fit-content; background: #fffaf0; color: #3d2c8d; border-radius: 22px; padding: 24px 30px; box-shadow: 0 10px 0 #3d2c8d; text-align: center; }
-#menu h1 { margin: 0; font-size: 48px; } .sub { margin-top: 4px; }
-#menu label { display: block; margin: 10px 0; }
-input { font: inherit; padding: 6px 10px; border: 3px solid #3d2c8d; border-radius: 10px; width: 60%; }
-#sens { width: 80px; }
-button { font: inherit; font-size: 22px; padding: 10px 26px; margin: 12px 0; background: #f15bb5; color: #fff; border: 0; border-radius: 14px; box-shadow: 0 5px 0 #9b2c74; cursor: pointer; }
-.keys { font-size: 14px; line-height: 1.8; }
-kbd { background: #3d2c8d; color: #fff; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
-#promoForm input { display: block; width: 90%; margin: 8px auto; }
-#share { display: block; color: #00a5d8; }
+
+/* HUD: CS:S-style amber numerals on smoked boxes */
+#hud { position: fixed; inset: 0; pointer-events: none; color: var(--amber); text-shadow: 0 1px 0 #000; }
+.box { position: absolute; background: rgba(0, 0, 0, .45); padding: 4px 14px; border-radius: 4px; }
+#crosshair { position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px; background:
+  linear-gradient(var(--amber), var(--amber)) center/2px 14px no-repeat, linear-gradient(var(--amber), var(--amber)) center/14px 2px no-repeat; opacity: .9; }
+#crosshair.hit { filter: drop-shadow(0 0 3px #ff2a2a) hue-rotate(-40deg) brightness(1.4); transform: scale(1.4); }
+#speed { bottom: 74px; left: 50%; transform: translateX(-50%); font-size: 38px; }
+#speed::after { content: " U/S"; font-size: 16px; }
+#timer { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); font-size: 30px; color: var(--bone); }
+#stage { position: absolute; top: 48px; left: 50%; transform: translateX(-50%); font-size: 16px; color: var(--bone); opacity: .8; }
+#hp { bottom: 18px; left: 18px; font-size: 40px; }
+#ammo { bottom: 18px; right: 18px; font-size: 36px; text-align: right; }
+#ammo small { font-size: 14px; color: var(--bone); opacity: .8; }
+#round { position: absolute; top: 14px; right: 18px; font-size: 16px; color: var(--bone); }
+#banner { position: absolute; top: 26%; width: 100%; text-align: center; font-size: 40px; color: var(--bone); text-shadow: 0 2px 0 #000, 0 0 18px #000; padding: 0 5%; box-sizing: border-box; }
+#promo { position: absolute; top: 14px; left: 18px; max-width: 34ch; font-size: 15px; color: var(--bone); background: rgba(0, 0, 0, .6); border-left: 4px solid var(--hazard); padding: 8px 12px; pointer-events: auto; }
+#promo a { color: var(--amber); cursor: pointer; text-decoration: underline; }
+#feed { position: absolute; top: 46px; right: 18px; font-size: 15px; text-align: right; color: var(--bone); }
+#feed div { background: rgba(0, 0, 0, .55); padding: 3px 8px; margin-bottom: 3px; display: inline-block; clear: both; float: right; }
+
+/* Scoreboard */
+#board { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(760px, 92vw); max-height: 86vh; overflow: hidden;
+  background: rgba(8, 9, 12, .88); border: 1px solid #333; border-top: 4px solid var(--hazard); padding: 14px 20px; color: var(--bone); font-size: 16px; }
+#board .title { font-size: 26px; color: var(--amber); margin-bottom: 8px; } #board .title span { font-size: 14px; color: var(--bone); opacity: .7; margin-left: 10px; }
+#board table { width: 100%; border-collapse: collapse; }
+#board th { text-align: left; font-weight: normal; font-size: 12px; opacity: .6; border-bottom: 1px solid #333; padding: 4px 6px; }
+#board td { padding: 3px 6px; border-bottom: 1px solid #1d1e22; }
+#board tr.me td { color: var(--amber); }
+#board td img { width: 40px; height: 25px; object-fit: cover; display: block; border: 1px solid #444; }
+#board .skull { display: inline-block; width: 40px; text-align: center; opacity: .6; }
+#board .sponsor { color: var(--amber); }
+#board .cols { display: flex; gap: 24px; margin-top: 12px; } #board .cols > div { flex: 1; } #board .cols b { color: var(--amber); font-weight: normal; }
+
+/* Menus */
+#menu, #promoForm { position: fixed; inset: 0; margin: auto; width: min(620px, 94vw); height: fit-content; max-height: 94vh; overflow: auto; box-sizing: border-box;
+  background: rgba(10, 11, 14, .94); color: var(--bone); border: 1px solid #2c2d33; padding: 0 28px 20px; text-align: left; }
+.hazard { height: 10px; margin: 0 -28px 14px; background: repeating-linear-gradient(-45deg, var(--hazard) 0 14px, #111 14px 28px); }
+#menu h1 { margin: 0; font-size: 56px; font-weight: normal; color: var(--amber); letter-spacing: 2px; }
+.sub { margin: 0 0 14px; opacity: .75; font-family: system-ui, sans-serif; font-size: 14px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #9a9890; }
+label.check { flex-direction: row; align-items: center; gap: 8px; }
+label.pick { position: relative; }
+label.pick img { height: 40px; max-width: 80px; object-fit: contain; background: #000; border: 1px dashed #444; }
+label.pick img:not([src]), label.pick img[src=""] { width: 64px; }
+input { font: 15px system-ui, sans-serif; padding: 7px 9px; background: #16171b; color: var(--bone); border: 1px solid #34353b; border-radius: 2px; }
+input:focus { outline: 1px solid var(--hazard); }
+input[type=file] { font-size: 12px; padding: 4px; }
+button { font: 24px var(--font); letter-spacing: 2px; padding: 10px 34px; margin: 16px 0 10px; background: var(--hazard); color: #111; border: 0; border-radius: 2px; cursor: pointer; }
+button:hover { background: var(--amber); }
+.keys { font: 13px/1.9 system-ui, sans-serif; color: #b9b5a8; } .keys b { font-family: var(--font); font-weight: normal; color: var(--amber); }
+kbd { background: #24252b; color: var(--bone); border: 1px solid #3a3b42; border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; font: 11px var(--font); }
+#players h3 { font-weight: normal; color: var(--amber); margin: 14px 0 6px; }
+#players div { display: flex; justify-content: space-between; align-items: center; font: 14px system-ui, sans-serif; border-bottom: 1px solid #1d1e22; padding: 2px 0; }
+#players i { color: var(--amber); font-style: normal; }
+#players button { font-size: 12px; padding: 3px 10px; margin: 2px 0; background: #2a2b31; color: var(--bone); }
+#promoForm h2 { margin: 0; font-size: 36px; font-weight: normal; color: var(--amber); }
+#promoForm p { font-family: system-ui, sans-serif; opacity: .8; }
+#promoForm input { display: block; width: 100%; box-sizing: border-box; margin: 8px 0; }
+#share { color: var(--amber); font-size: 18px; margin-left: 16px; }

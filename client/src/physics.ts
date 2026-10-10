@@ -48,6 +48,7 @@ export type Trigger = {
 };
 export type LevelJSON = {
   name: string;
+  minRunMs?: number;
   spawns: { pos: V3; yaw: number }[]; // index = stage
   brushes: { verts: V3[]; color: string }[];
   triggers: Trigger[];

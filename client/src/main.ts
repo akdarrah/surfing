@@ -1,33 +1,76 @@
 import levelJson from '../../levels/cloud-harbor.json';
-import { loadLevel, playerMove, touching, trace, hullMax, add, scale, len, TICK, EYE, DUCK_EYE, type PlayerState, type LevelJSON, type V3 } from './physics.ts';
-import { World, Boat } from './render.ts';
-import { Net, encodeShot, encodeState, samplePose } from './net.ts';
+import { loadLevel, playerMove, touching, trace, hullMax, add, scale, TICK, EYE, DUCK_EYE, type PlayerState, type LevelJSON, type V3 } from './physics.ts';
+import { World, Boat, imageTexture, textureFromCanvas } from './render.ts';
+import { Net, encodeImage, encodeShot, encodeState, samplePose } from './net.ts';
 
 // Shared with server/src/game.rs — keep in sync.
 const WEAPONS = [
-  { name: 'Popgun', cd: 150, mag: 12, reload: 1400, pellets: 1, spread: 0.01, color: 0x9b5de5, selfKb: 0 },
-  { name: 'Blunderbuss', cd: 900, mag: 4, reload: 2000, pellets: 8, spread: 0.08, color: 0xf15bb5, selfKb: 0 },
-  { name: 'Cannon', cd: 1200, mag: 2, reload: 2400, pellets: 1, spread: 0, color: 0x00bbf9, selfKb: 450 },
+  { name: 'Flintlock', cd: 150, mag: 12, reload: 1400, pellets: 1, spread: 0.01, color: 0xffb000, selfKb: 0 },
+  { name: 'Blunderbuss', cd: 900, mag: 4, reload: 2000, pellets: 8, spread: 0.08, color: 0xff5a1f, selfKb: 0 },
+  { name: 'Hand Cannon', cd: 1200, mag: 2, reload: 2400, pellets: 1, spread: 0, color: 0xff2a2a, selfKb: 450 },
 ];
 
 const $ = (id: string) => document.getElementById(id)!;
+const input = (id: string) => $(id) as HTMLInputElement;
 const level = loadLevel(levelJson as LevelJSON);
 const world = new World($('game'));
 world.buildLevel(level);
-const myBoat = new Boat('#ffd166', '');
+const myBoat = new Boat('#ffb000', '');
 world.scene.add(myBoat.group);
 
-const sillyName = () => {
-  const a = ['Captain', 'Admiral', 'Skipper', 'Commodore', 'First Mate', 'Bosun'];
-  const b = ['Soggy', 'Breezy', 'Wobbly', 'Salty', 'Fluffy', 'Gusty', 'Puffy', 'Zippy'];
-  const c = ['Biscuit', 'Pickle', 'Noodle', 'Barnacle', 'Muffin', 'Teacup', 'Walrus', 'Crumpet'];
+const gamertag = () => {
+  const a = ['Grim', 'Rusty', 'Dead', 'Iron', 'Black', 'Salty', 'Savage', 'Rogue', 'Toxic', 'Cursed'];
+  const b = ['Kraken', 'Marauder', 'Reaper', 'Gunner', 'Corsair', 'Viper', 'Jackal', 'Hook', 'Wraith', 'Buccaneer'];
   const r = (x: string[]) => x[Math.floor(Math.random() * x.length)];
-  return `${r(a)} ${r(b)} ${r(c)}`;
+  return `${r(a)}${r(b)}`;
 };
-const nameInput = $('name') as HTMLInputElement;
-const sensInput = $('sens') as HTMLInputElement;
-nameInput.value = localStorage.getItem('name') || sillyName();
-sensInput.value = localStorage.getItem('sens') || '2';
+
+// --- profile (kept in localStorage so you set it once) ----------------------
+const prof = {
+  name: localStorage.getItem('name') || gamertag(),
+  sponsor: localStorage.getItem('sponsor') || '',
+  flag: localStorage.getItem('flag') || '', // data: URL of the processed image
+  spray: localStorage.getItem('spray') || '',
+  hide: localStorage.getItem('hideImages') === '1',
+};
+input('name').value = prof.name;
+input('sponsor').value = prof.sponsor;
+input('sens').value = localStorage.getItem('sens') || '2';
+input('hideImages').checked = prof.hide;
+const preview = () => {
+  ($('flagPreview') as HTMLImageElement).src = prof.flag || '';
+  ($('sprayPreview') as HTMLImageElement).src = prof.spray || '';
+};
+preview();
+
+// Resize/crop on a canvas: keeps uploads tiny and strips anything that isn't pixels (EXIF, GPS, payloads).
+async function processImage(file: File, w: number, h: number, type: 'image/jpeg' | 'image/png') {
+  const bmp = await createImageBitmap(file);
+  for (const s of [1, 0.75, 0.5]) {
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * s); c.height = Math.round(h * s);
+    const k = Math.max(c.width / bmp.width, c.height / bmp.height);
+    c.getContext('2d')!.drawImage(bmp, (c.width - bmp.width * k) / 2, (c.height - bmp.height * k) / 2, bmp.width * k, bmp.height * k);
+    const url = c.toDataURL(type, 0.82);
+    if (url.length * 0.75 < 46 * 1024) return url;
+  }
+  throw new Error('image too detailed');
+}
+const dataUrlBytes = (url: string) => Uint8Array.from(atob(url.split(',')[1]), c => c.charCodeAt(0));
+
+for (const [id, key, w, h, type] of [['flagFile', 'flag', 128, 80, 'image/jpeg'], ['sprayFile', 'spray', 128, 128, 'image/png']] as const) {
+  input(id).onchange = async () => {
+    const f = input(id).files?.[0];
+    if (!f) return;
+    try {
+      prof[key] = await processImage(f, w, h, type);
+      localStorage.setItem(key, prof[key]);
+      preview();
+    } catch {
+      banner('THAT IMAGE DIDN\'T WORK, TRY ANOTHER', 2500);
+    }
+  };
+}
 
 // --- game state -------------------------------------------------------------
 const me: PlayerState = { pos: [...level.spawns[0].pos] as V3, vel: [0, 0, 0], onGround: false, ducked: false };
@@ -38,21 +81,31 @@ let owned = [true, false, false], weapon = 0, ammo = WEAPONS.map(w => w.mag), re
 let hp = 100, deadUntil = 0, myId = -1;
 let runStart: number | null = null, finished = false;
 let phase = 'race', phaseEndsAt = 0;
-let promo: { text: string; url?: string; by: string } | null = null;
+let goldPending = false, myTagId = 0;
+let intro: { tag: Tag; until: number } | null = null;
 let board: { best: { name: string; ms: number }[]; wins: { name: string; wins: number }[] } = { best: [], wins: [] };
 const keys = new Set<string>();
 let mouseDown = false;
 const boats = new Map<number, { boat: Boat; last?: V3 }>();
 const feed: { text: string; until: number }[] = [];
 
+type Profile = { name: string; sponsor: string; color: string; flag?: string | null; spray?: string | null };
+type Tag = { id: number; hash: string; pos: V3; normal: V3; name: string; sponsor: string; at: number };
+const profiles = new Map<number, Profile>();
+const roster = new Map<number, [number, number, number, boolean]>();
+const sprays = new Map<number, { pos: V3; normal: V3; hash: string }>();
+const tags = new Map<number, Tag>();
+const muted = new Set<number>();
+let uploaded = { flag: '', spray: '' };
+
 const say = (text: string) => feed.push({ text, until: performance.now() + 6000 });
-const banner = (text: string, ms = 3000) => {
+function banner(text: string, ms = 3000) {
   const el = $('banner');
   el.textContent = text;
   el.hidden = false;
   clearTimeout((banner as any).t);
   (banner as any).t = setTimeout(() => (el.hidden = true), ms);
-};
+}
 
 function respawn(s: number) {
   stage = s;
@@ -74,46 +127,141 @@ function newRound() {
   deadUntil = 0;
   runStart = null;
   finished = false;
+  goldPending = false;
+}
+
+// --- images: flags, sprays, permanent tags ----------------------------------
+const showImages = (id: number) => !prof.hide && !muted.has(id);
+
+function applyFlag(id: number) {
+  const b = boats.get(id), p = profiles.get(id);
+  if (!b) return;
+  if (p?.flag && showImages(id)) imageTexture(p.flag).then(t => boats.get(id)?.boat.setFlag(t), () => {});
+  else b.boat.setFlag(null);
+}
+
+function applySpray(id: number) {
+  const s = sprays.get(id);
+  if (!s || !showImages(id)) return world.removeDecal(`s${id}`);
+  imageTexture(s.hash).then(t => sprays.get(id) === s && world.setDecal(`s${id}`, t, s.pos, s.normal, 72), () => {});
+}
+
+function applyTag(tag: Tag) {
+  if (prof.hide) return world.removeDecal(`t${tag.id}`);
+  const date = new Date(tag.at * 1000).toLocaleDateString();
+  imageTexture(tag.hash).then(t => tags.has(tag.id) && world.setDecal(`t${tag.id}`, t, tag.pos, tag.normal, 128, [tag.name, ...(tag.sponsor ? [tag.sponsor] : []), date]), () => {});
+}
+
+function refreshImages() {
+  for (const id of boats.keys()) applyFlag(id);
+  for (const id of sprays.keys()) applySpray(id);
+  for (const t of tags.values()) applyTag(t);
+  ownFlag();
+}
+
+function ownFlag() {
+  if (!prof.flag) return myBoat.setFlag(null);
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    c.getContext('2d')!.drawImage(img, 0, 0);
+    myBoat.setFlag(textureFromCanvas(c));
+  };
+  img.src = prof.flag;
+}
+
+function uploadImages() {
+  if (prof.flag && uploaded.flag !== prof.flag) net.send(encodeImage(3, dataUrlBytes(prof.flag)));
+  if (prof.spray && uploaded.spray !== prof.spray) net.send(encodeImage(4, dataUrlBytes(prof.spray)));
+  uploaded = { flag: prof.flag, spray: prof.spray };
 }
 
 // --- networking -------------------------------------------------------------
 const net = new Net({
   onJson(m) {
     switch (m.t) {
-      case 'welcome':
+      case 'welcome': {
         myId = m.id;
         phase = m.round.phase; phaseEndsAt = m.round.endsAt;
         setPromo(m.promo); board = m.board;
+        profiles.clear(); sprays.clear(); tags.clear();
+        for (const k of world.decalKeys()) world.removeDecal(k);
+        for (const p of m.players) profiles.set(p.id, p);
+        for (const s of m.sprays) { sprays.set(s.id, s); applySpray(s.id); }
+        for (const t of m.tags) { tags.set(t.id, t); applyTag(t); }
+        uploaded = { flag: '', spray: '' };
+        uploadImages();
+        const want = Number(new URLSearchParams(location.search).get('tag'));
+        if (want && tags.has(want) && !intro) {
+          const tag = tags.get(want)!;
+          intro = { tag, until: performance.now() + 6000 };
+          banner(`TAGGED BY ${tag.name.toUpperCase()}${tag.sponsor ? ` [${tag.sponsor}]` : ''}`, 6000);
+        }
         break;
-      case 'join': say(`⛵ ${m.name} set sail`); break;
-      case 'leave': boats.get(m.id) && world.scene.remove(boats.get(m.id)!.boat.group); boats.delete(m.id); break;
+      }
+      case 'join': profiles.set(m.id, m); if (m.id !== myId) say(`${m.name} joined`); break;
+      case 'profile': profiles.set(m.id, m); applyFlag(m.id); break;
+      case 'leave':
+        boats.get(m.id) && world.scene.remove(boats.get(m.id)!.boat.group);
+        boats.delete(m.id); profiles.delete(m.id); roster.delete(m.id); sprays.delete(m.id);
+        world.removeDecal(`s${m.id}`);
+        break;
       case 'round':
         phase = m.phase; phaseEndsAt = m.endsAt;
-        if (m.phase === 'race') { newRound(); banner('New round — race to the lighthouse! 🏁'); }
-        else if (m.winner) banner(`🏆 ${m.winner} wins in ${fmt(m.ms)}!`, 6000);
-        else banner('Time! Nobody reached the lighthouse.', 5000);
+        if (m.phase === 'race') { newRound(); banner('ROUND START — FIRST TO THE TOWER TAKES IT'); }
+        else if (m.winner) banner(`${m.winner.toUpperCase()} TAKES THE ROUND  ${fmt(m.ms)}`, 6000);
+        else banner('ROUND DRAW', 5000);
         break;
-      case 'promptPromo': openPromoForm(); break;
+      case 'promptPromo':
+        goldPending = true;
+        banner('YOU WON. AIM AT A WALL AND PRESS T — YOUR SPRAY STAYS ON THE MAP', 12000);
+        setTimeout(() => { if (goldPending) openPromoForm(); }, 12000);
+        break;
+      case 'tag':
+        for (const id of m.removed) { tags.delete(id); world.removeDecal(`t${id}`); }
+        tags.set(m.tag.id, m.tag);
+        applyTag(m.tag);
+        if (m.by === myId) {
+          goldPending = false;
+          myTagId = m.tag.id;
+          banner('TAGGED. IT STAYS UNTIL SOMEONE PAINTS OVER IT', 3000);
+          setTimeout(openPromoForm, 1200);
+        } else say(`${m.tag.name} tagged the map`);
+        break;
+      case 'untag': for (const id of m.ids) { tags.delete(id); world.removeDecal(`t${id}`); } break;
+      case 'spray':
+        sprays.set(m.id, { pos: m.pos, normal: m.normal, hash: m.hash });
+        applySpray(m.id);
+        world.puff(m.pos, 14, performance.now() / 1000, 0x555555, 0.5);
+        break;
+      case 'clearImages':
+        for (const p of profiles.values()) { p.flag = null; p.spray = null; }
+        for (const id of sprays.keys()) world.removeDecal(`s${id}`);
+        sprays.clear();
+        refreshImages();
+        break;
+      case 'roster': roster.clear(); for (const [id, st, k, d, fin] of m.p) roster.set(id, [st, k, d, fin]); break;
       case 'promo': setPromo(m.promo); break;
       case 'board': board = m; break;
       case 'hit':
         hp = m.hp;
         me.vel = add(me.vel, m.kb);
         if (hp <= 0 && !deadUntil) deadUntil = performance.now() + 2000; // in case the 'sunk' frame got dropped
-        world.puff(add(me.pos, [0, 0, 40]), 20, performance.now() / 1000, 0xff4d6d, 0.4);
+        world.puff(add(me.pos, [0, 0, 40]), 20, performance.now() / 1000, 0xb3001b, 0.4);
         break;
       case 'sunk':
-        say(`💥 ${m.byName} sank ${m.name}`);
-        if (m.id === myId) { hp = 0; deadUntil = performance.now() + 2000; banner(`Sunk by ${m.byName}! 🫧`, 2000); }
+        say(`${m.byName}  [${WEAPONS[m.w]?.name ?? '☠'}]  ${m.name}`);
+        if (m.id === myId) { hp = 0; deadUntil = performance.now() + 2000; banner(`SUNK BY ${m.byName.toUpperCase()}`, 2000); }
         break;
       case 'hitmark':
         $('crosshair').classList.add('hit');
         setTimeout(() => $('crosshair').classList.remove('hit'), 120);
         break;
-      case 'pickup': owned[m.weapon] = true; weapon = m.weapon; ammo[m.weapon] = WEAPONS[m.weapon].mag; banner(`Got the ${WEAPONS[m.weapon].name}!`, 1500); break;
-      case 'split': say(`Stage ${m.stage} ✓ ${fmt(m.ms)}`); break;
-      case 'invalid': say(`⚠️ run not counted: ${m.reason}`); break;
-      case 'notice': banner(m.text, 3000); openPromoForm(); break;
+      case 'pickup': owned[m.weapon] = true; weapon = m.weapon; ammo[m.weapon] = WEAPONS[m.weapon].mag; banner(`PICKED UP ${WEAPONS[m.weapon].name.toUpperCase()}`, 1500); break;
+      case 'split': say(`STAGE ${m.stage} ✓ ${fmt(m.ms)}`); break;
+      case 'invalid': say(`RUN NOT COUNTED: ${m.reason}`); break;
+      case 'notice': banner(m.text.toUpperCase(), 3000); if (!$('promoForm').hidden) openPromoForm(); break;
     }
   },
   onFx(shooter, w, origin, dir) {
@@ -122,13 +270,12 @@ const net = new Net({
   },
 });
 
-function setPromo(p: typeof promo) {
-  promo = p;
+function setPromo(p: { text: string; url?: string; by: string } | null) {
   world.setPromo(p);
   const el = $('promo');
   el.hidden = !p;
   if (!p) return;
-  el.textContent = `🏆 ${p.by}: ${p.text} `;
+  el.textContent = `${p.by}: ${p.text} `;
   if (p.url) {
     const a = document.createElement('a');
     a.textContent = p.url;
@@ -139,27 +286,37 @@ function setPromo(p: typeof promo) {
 }
 
 function openPromoForm() {
+  goldPending = false;
   document.exitPointerLock();
   const f = $('promoForm') as HTMLFormElement;
-  const share = $('share') as HTMLAnchorElement;
-  const page = window.top === window ? location.href : document.referrer || location.href;
-  share.href = `https://x.com/intent/post?text=${encodeURIComponent(`I just won a round of Sky Surf ⛵ ${page}`)}`;
+  const link = myTagId ? `${location.origin}/?tag=${myTagId}` : location.origin;
+  const text = myTagId ? `I just tagged the map in Sky Surf. Come paint over me 🏴‍☠️ ${link}` : `I just took a round in Sky Surf 🏴‍☠️ ${link}`;
+  ($('share') as HTMLAnchorElement).href = `https://x.com/intent/post?text=${encodeURIComponent(text)}`;
   f.hidden = false;
-  setTimeout(() => (f.hidden = true), 15000);
+  clearTimeout((openPromoForm as any).t);
+  (openPromoForm as any).t = setTimeout(() => (f.hidden = true), 25000);
 }
 ($('promoForm') as HTMLFormElement).onsubmit = e => {
   e.preventDefault();
-  net.send({ t: 'promo', text: ($('promoText') as HTMLInputElement).value, url: ($('promoUrl') as HTMLInputElement).value });
+  net.send({ t: 'promo', text: input('promoText').value, url: input('promoUrl').value });
   $('promoForm').hidden = true;
 };
 
 // --- input ------------------------------------------------------------------
 const canvas = world.renderer.domElement;
 $('play').onclick = () => {
-  localStorage.setItem('name', nameInput.value.trim() || sillyName());
-  localStorage.setItem('sens', sensInput.value);
-  myBoat.setName(nameInput.value);
-  if (!net.ws) net.connect(localStorage.getItem('name')!);
+  prof.name = input('name').value.trim() || gamertag();
+  prof.sponsor = input('sponsor').value.trim();
+  prof.hide = input('hideImages').checked;
+  localStorage.setItem('name', prof.name);
+  localStorage.setItem('sponsor', prof.sponsor);
+  localStorage.setItem('sens', input('sens').value);
+  localStorage.setItem('hideImages', prof.hide ? '1' : '');
+  myBoat.setName(prof.name, prof.sponsor);
+  refreshImages();
+  if (!net.ws) net.connect(() => ({ name: prof.name, sponsor: prof.sponsor }));
+  else uploadImages();
+  intro = null;
   canvas.requestPointerLock();
 };
 canvas.onclick = () => canvas.requestPointerLock();
@@ -167,12 +324,12 @@ document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
   $('menu').hidden = locked;
   $('hud').hidden = !locked && !net.ws;
-  if (!locked) { keys.clear(); mouseDown = false; }
+  if (!locked) { keys.clear(); mouseDown = false; renderPlayers(); }
 });
 document.addEventListener('mousemove', e => {
   if (document.pointerLockElement !== canvas) return;
   // CS: degrees = counts * sensitivity * m_yaw(0.022)
-  const k = (Number(sensInput.value) || 2) * 0.022 * (Math.PI / 180);
+  const k = (Number(input('sens').value) || 2) * 0.022 * (Math.PI / 180);
   yaw -= e.movementX * k;
   pitch = Math.max(-1.55, Math.min(1.55, pitch - e.movementY * k));
 });
@@ -186,11 +343,27 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF' && !deadUntil) respawn(stage);
   if (e.code === 'KeyV') thirdPerson = !thirdPerson;
   if (e.code === 'KeyR') startReload();
+  if (e.code === 'KeyT') spray();
   const n = ['Digit1', 'Digit2', 'Digit3'].indexOf(e.code);
   if (n >= 0 && owned[n]) weapon = n;
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
+
+// Mute list lives on the pause menu, where you have a mouse cursor.
+function renderPlayers() {
+  const rows = [...profiles].filter(([id]) => id !== myId);
+  $('players').innerHTML = rows.length
+    ? `<h3>PLAYERS</h3>` + rows.map(([id, p]) => `<div><span>${esc(p.name)}${p.sponsor ? ` <i>[${esc(p.sponsor)}]</i>` : ''}</span><button type="button" data-mute="${id}">${muted.has(id) ? 'UNMUTE' : 'MUTE'}</button></div>`).join('')
+    : '';
+}
+$('players').onclick = e => {
+  const id = Number((e.target as HTMLElement).dataset.mute);
+  if (!Number.isFinite(id) || (e.target as HTMLElement).dataset.mute === undefined) return;
+  muted.has(id) ? muted.delete(id) : muted.add(id);
+  applyFlag(id); applySpray(id);
+  renderPlayers();
+};
 
 function startReload() {
   const w = WEAPONS[weapon];
@@ -199,14 +372,22 @@ function startReload() {
   net.send({ t: 'reload' });
 }
 
-// --- shooting ---------------------------------------------------------------
+// --- shooting + spraying ----------------------------------------------------
 const eye = (): V3 => add(me.pos, [0, 0, me.ducked ? DUCK_EYE : EYE]);
 const aim = (y = yaw, p = pitch): V3 => [Math.cos(p) * Math.cos(y), Math.cos(p) * Math.sin(y), Math.sin(p)];
+
+function spray() {
+  const o = eye();
+  const tr = trace(level, o, add(o, scale(aim(), 300)), [0, 0, 0], [0, 0, 0]);
+  if (tr.fraction === 1 || !tr.normal) return banner('GET CLOSER TO A WALL', 1000);
+  if (!prof.spray && !(goldPending && prof.flag)) return banner('SET A SPRAY IMAGE IN THE MENU (ESC)', 2000);
+  net.send({ t: goldPending ? 'tag' : 'spray', pos: tr.end, normal: tr.normal });
+}
 
 function tracerFrom(origin: V3, dir: V3, color: number) {
   const tr = trace(level, origin, add(origin, scale(dir, 8000)), [0, 0, 0], [0, 0, 0]);
   world.tracer(add(origin, [0, 0, -8]), tr.end, color, performance.now() / 1000);
-  world.puff(origin, 8, performance.now() / 1000, color, 0.3);
+  world.puff(origin, 8, performance.now() / 1000, 0x3a3a3a, 0.3);
 }
 
 function fire(now: number) {
@@ -248,7 +429,7 @@ function tick(now: number) {
       net.send(encodeState(me.pos, yaw, pitch, (me.ducked ? 1 : 0) | (weapon << 2)));
       respawn(stage + 1);
     }
-    else if (t.type === 'end' && !finished && runStart !== null) { finished = true; say(`🏁 Finished in ${fmt(now - runStart)}!`); }
+    else if (t.type === 'end' && !finished && runStart !== null) { finished = true; say(`FINISHED ${fmt(now - runStart)}`); }
     else if (t.type === 'pickup' && !owned[t.weapon!]) { owned[t.weapon!] = true; weapon = t.weapon!; ammo[weapon] = WEAPONS[weapon].mag; }
   }
 }
@@ -278,31 +459,44 @@ function frame(now: number) {
   const t = now / 1000;
   const cam = world.camera;
   const look = aim();
-  if (thirdPerson) {
-    const back = add(pos, add(scale(look, -260), [0, 0, 90]));
-    cam.position.set(...back);
-    myBoat.group.visible = true;
-  } else {
-    cam.position.set(pos[0], pos[1], pos[2] + (me.ducked ? DUCK_EYE : EYE));
+  if (intro && now < intro.until) {
+    // Arrived via a shared ?tag= link: show them the tag first.
+    const { pos: tp, normal: n } = intro.tag;
+    cam.position.set(tp[0] + n[0] * 280, tp[1] + n[1] * 280, tp[2] + n[2] * 280 + 40);
+    cam.lookAt(...tp);
     myBoat.group.visible = false;
+  } else {
+    if (thirdPerson) {
+      cam.position.set(...add(pos, add(scale(look, -260), [0, 0, 90])));
+      myBoat.group.visible = true;
+    } else {
+      cam.position.set(pos[0], pos[1], pos[2] + (me.ducked ? DUCK_EYE : EYE));
+      myBoat.group.visible = false;
+    }
+    cam.lookAt(cam.position.x + look[0], cam.position.y + look[1], cam.position.z + look[2]);
   }
-  cam.lookAt(cam.position.x + look[0], cam.position.y + look[1], cam.position.z + look[2]);
   const lateral = me.vel[0] * Math.sin(yaw) - me.vel[1] * Math.cos(yaw);
   myBoat.pose(pos, yaw, speed, me.onGround ? 0 : Math.max(-0.6, Math.min(0.6, lateral / 1500)), t, !!deadUntil);
-  if (speed > 700 && Math.random() < speed / 4000) world.puff(add(pos, [0, 0, 20]), 4 + Math.random() * 4, t, 0xffffff, 0.9);
+  if (speed > 700 && Math.random() < speed / 4000) world.puff(add(pos, [0, 0, 20]), 4 + Math.random() * 4, t, 0x7a7a7a, 0.9);
 
   const rt = net.renderTime();
   for (const r of net.remotes.values()) {
     if (r.id === myId) continue;
     let b = boats.get(r.id);
-    if (!b) { b = { boat: new Boat(r.color, r.name) }; boats.set(r.id, b); world.scene.add(b.boat.group); }
+    if (!b) {
+      const p = profiles.get(r.id);
+      b = { boat: new Boat(p?.color ?? '#888', p?.name ?? '?', p?.sponsor ?? '') };
+      boats.set(r.id, b);
+      world.scene.add(b.boat.group);
+      applyFlag(r.id);
+    }
     const p = samplePose(r, rt);
     b.boat.group.visible = !!p;
     if (!p) continue;
     const v = b.last ? Math.hypot(p.pos[0] - b.last[0], p.pos[1] - b.last[1]) / Math.max(dt, 0.001) : 0;
     b.last = p.pos;
     b.boat.pose(p.pos, p.yaw, v, 0, t, !!(p.flags & 2));
-    if (v > 700 && Math.random() < v / 6000) world.puff(add(p.pos, [0, 0, 20]), 5, t, 0xffffff, 0.8);
+    if (v > 700 && Math.random() < v / 6000) world.puff(add(p.pos, [0, 0, 20]), 5, t, 0x7a7a7a, 0.8);
   }
   for (const [id, b] of boats) if (!net.remotes.has(id)) { world.scene.remove(b.boat.group); boats.delete(id); }
 
@@ -316,24 +510,34 @@ const fmt = (ms: number) => `${Math.floor(ms / 60000)}:${((ms / 1000) % 60).toFi
 
 function hud(now: number, speed: number) {
   $('speed').textContent = String(Math.round(speed));
-  $('timer').textContent = runStart === null ? '' : finished ? '🏁' : fmt(Math.max(0, performance.now() - runStart));
-  $('stage').textContent = `Stage ${stage + 1} / ${level.spawns.length}`;
-  $('hp').textContent = deadUntil ? '🫧 sunk' : `❤️ ${hp}`;
+  $('timer').textContent = runStart === null ? '' : finished ? 'FINISHED' : fmt(Math.max(0, performance.now() - runStart));
+  $('stage').textContent = `STAGE ${stage + 1}/${level.spawns.length}`;
+  $('hp').textContent = deadUntil ? 'SUNK' : `+ ${hp}`;
   const w = WEAPONS[weapon];
-  $('ammo').innerHTML = `${w.name} ${reloadUntil ? 'reloading…' : `${ammo[weapon]}/${w.mag}`}<br><small>${WEAPONS.map((x, i) => (owned[i] ? `${i + 1}:${x.name}` : `${i + 1}:🔒`)).join(' ')}</small>`;
+  $('ammo').innerHTML = `<small>${w.name.toUpperCase()}</small> ${reloadUntil ? '--' : `${ammo[weapon]} | ${w.mag}`}<br><small>${WEAPONS.map((x, i) => (owned[i] ? `${i + 1} ${x.name}` : `${i + 1} ——`)).join('  ')}</small>`;
   const left = Math.max(0, phaseEndsAt - net.serverNow());
-  $('round').textContent = net.connected ? `${phase === 'race' ? 'Round' : 'Next round'} ${fmt(left).slice(0, -3)} · ${net.remotes.size} online` : 'offline (solo)';
+  $('round').textContent = net.connected ? `${phase === 'race' ? 'ROUND' : 'NEXT'} ${fmt(left).slice(0, -3)}  ·  ${profiles.size} ONLINE` : 'OFFLINE';
   while (feed.length && feed[0].until < now) feed.shift();
-  $('feed').innerHTML = feed.map(f => esc(f.text)).join('<br>');
+  $('feed').innerHTML = feed.map(f => `<div>${esc(f.text)}</div>`).join('');
   const show = keys.has('Tab');
   $('board').hidden = !show;
-  if (show) {
-    $('board').innerHTML = `<b>Best runs</b><table>${board.best.map((b, i) => `<tr><td>${i + 1}.</td><td>${esc(b.name)}</td><td>${fmt(b.ms)}</td></tr>`).join('')}</table>`
-      + `<b>Most wins</b><table>${board.wins.map((b, i) => `<tr><td>${i + 1}.</td><td>${esc(b.name)}</td><td>${b.wins}</td></tr>`).join('')}</table>`;
-  }
+  if (show) scoreboard();
 }
 
-const esc = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+function scoreboard() {
+  const rows = [...profiles].map(([id, p]) => ({ id, p, r: roster.get(id) ?? ([0, 0, 0, false] as const) }))
+    .sort((a, b) => b.r[0] - a.r[0] || b.r[1] - a.r[1]);
+  const flag = (id: number, p: Profile) => (p.flag && showImages(id) ? `<img src="/img/${esc(p.flag)}">` : '<span class="skull">☠</span>');
+  $('board').innerHTML = `<div class="title">SKY SURF <span>${esc(level.name.toUpperCase())} · ${profiles.size} PLAYERS</span></div>`
+    + `<table class="players"><tr><th></th><th>NAME</th><th>SPONSOR</th><th>STAGE</th><th>K</th><th>D</th></tr>`
+    + rows.map(({ id, p, r }) => `<tr${id === myId ? ' class="me"' : ''}><td>${flag(id, p)}</td><td>${esc(p.name)}</td><td class="sponsor">${esc(p.sponsor || '')}</td><td>${r[3] ? '✓' : r[0] + 1}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')
+    + `</table><div class="cols"><div><b>BEST RUNS</b><table>${board.best.map((b, i) => `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td>${fmt(b.ms)}</td></tr>`).join('')}</table></div>`
+    + `<div><b>MOST WINS</b><table>${board.wins.map((b, i) => `<tr><td>${i + 1}</td><td>${esc(b.name)}</td><td>${b.wins}</td></tr>`).join('')}</table></div></div>`;
+}
 
-if (import.meta.env.DEV) (window as any).game = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson) };
+const esc = (s: string) => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+
+ownFlag();
+myBoat.setName(prof.name, prof.sponsor);
+if (import.meta.env.DEV) (window as any).game = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson), spray, net, tab: (on: boolean) => (on ? keys.add('Tab') : keys.delete('Tab')) };
 requestAnimationFrame(frame);
