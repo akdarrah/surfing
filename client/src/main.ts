@@ -247,6 +247,10 @@ function openBillboardForm(slot: number) {
 // --- input + full screen -----------------------------------------------------
 const canvas = world.renderer.domElement;
 function launch(fullscreen: boolean) {
+  // Grab the mouse first, inside the click's user-gesture window, before anything that could throw or take time.
+  // Full screen changes the document's lock state, so in that case the lock is requested on fullscreenchange.
+  if (fullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => canvas.requestPointerLock());
+  else canvas.requestPointerLock();
   prof.name = input('name').value.trim() || callsign();
   prof.sponsor = input('sponsor').value.trim();
   prof.hide = input('hideImages').checked;
@@ -258,10 +262,10 @@ function launch(fullscreen: boolean) {
   audio.start();
   refreshImages();
   if (!net.ws) net.connect(() => ({ name: prof.name, sponsor: prof.sponsor }));
-  if (fullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
-  canvas.requestPointerLock();
   $('hud').hidden = false;
 }
+document.addEventListener('fullscreenchange', () => { if (document.fullscreenElement && document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
+document.addEventListener('pointerlockerror', () => { $('menu').hidden = true; banner('CLICK THE GAME TO GRAB THE MOUSE', 4000); });
 $('play').onclick = () => launch(false);
 $('playFs').onclick = () => launch(true);
 canvas.onclick = () => { if (!$('menu').hidden) return; canvas.requestPointerLock(); };
@@ -489,6 +493,6 @@ const esc = (s: string) => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(
   await world.init();
   world.buildLevel(level, json);
   ownFlag();
-  if (import.meta.env.DEV) (window as any).game = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson), net, world, setPhase, tab: (on: boolean) => (on ? keys.add('Tab') : keys.delete('Tab')), fly: (on: boolean) => (fly.on = on), auto: (on: boolean) => (auto = on ? autopilot(json.line, stage) : null), audio, state: () => ({ phase, stage, runStart, finished, finishMs, myId, billboards: [...billboards.values()], record }) };
+  if (import.meta.env.DEV) (window as any).skysurf = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson), net, world, setPhase, tab: (on: boolean) => (on ? keys.add('Tab') : keys.delete('Tab')), fly: (on: boolean) => (fly.on = on), auto: (on: boolean) => (auto = on ? autopilot(json.line, stage) : null), audio, state: () => ({ phase, stage, runStart, finished, finishMs, myId, billboards: [...billboards.values()], record, ghostFrames: ghostFrames.length, ghostVisible: ghost.visible, locked: document.pointerLockElement === canvas }) };
   requestAnimationFrame(frame);
 })();
