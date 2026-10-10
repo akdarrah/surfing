@@ -2,9 +2,7 @@
 // strafe toward where you want the velocity to curve. A strafe perpendicular to the velocity only
 // ever adds speed (air-accelerate), so this gains through turns instead of braking.
 // Used by the physics test (proves every stage is completable) and the ghost when no record exists.
-import type { Input, PlayerState, V3 } from './physics.ts';
-
-export type LinePoint = [number, number, number, number, ...string[]];
+import type { Input, LinePoint, PlayerState, V3 } from './physics.ts';
 
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 

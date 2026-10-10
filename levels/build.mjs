@@ -74,7 +74,17 @@ class Turtle {
   }
   begin() { this.flush(); this.ridge(this.pos); }
   flush() {
-    if (this.path && this.path.length > 1) this.L.brushes.push(...prismChain(this.path, this.profile, this.color));
+    if (this.path && this.path.length > 1) {
+      this.L.brushes.push(...prismChain(this.path, this.profile, this.color));
+      // Neon strips: the ridge and both base edges of the ramp.
+      const { hw, h } = this.profile, pts = this.path;
+      const sideLine = sgn => pts.map((p, i) => {
+        const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+        const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
+        return [p[0] - dy / l * hw * sgn, p[1] + dx / l * hw * sgn, p[2] - h];
+      });
+      this.L.edges.push({ color: 'cyan', pts: pts.map(p => p.slice()) }, { color: 'magenta', pts: sideLine(1) }, { color: 'magenta', pts: sideLine(-1) });
+    }
     this.path = null;
   }
   straight(len, drop) {
@@ -108,11 +118,12 @@ class Turtle {
   rotate(deg) { this.heading += deg; return this; }
   // --- platforms, stages, props ---------------------------------------
   // A rotated slab (8 verts), so the platform follows the course heading. Returns its axis-aligned bounds for triggers.
-  platform(len, half, color = '#2b3340') {
+  platform(len, half, color = '#5b6678') {
     this.flush();
     const corners = [this.at(0, -half), this.at(0, half), this.at(len, half), this.at(len, -half)];
     const verts = corners.flatMap(c => [[c[0], c[1], this.pos[2] - 128], [c[0], c[1], this.pos[2]]]);
     this.L.brushes.push({ verts, color });
+    this.L.edges.push({ color: 'cyan', pts: [...corners, corners[0]].map(c => [c[0], c[1], this.pos[2] + 2]) });
     const min = [Math.min(...corners.map(c => c[0])), Math.min(...corners.map(c => c[1])), this.pos[2] - 128];
     const max = [Math.max(...corners.map(c => c[0])), Math.max(...corners.map(c => c[1])), this.pos[2]];
     this.track(min); this.track(max);
@@ -142,7 +153,7 @@ class Turtle {
     return this;
   }
   finish(len = 1400, half = 900) {
-    const [min, max] = this.platform(len, half, '#3a2f4a');
+    const [min, max] = this.platform(len, half, '#6a5a7a');
     this.L.triggers.push({ type: 'end', stage: this.si + 1, min: [min[0], min[1], max[2] - 1200], max: [max[0], max[1], max[2] + 5000] });
     this.L.props.push({ type: 'gate', pos: this.at(len * 0.3, 0, 0), yaw: this.heading, finish: true });
     this.line.push([...this.at(len * 0.5, 0, 60), this.si]);
@@ -160,7 +171,7 @@ class Turtle {
 }
 
 function meridian() {
-  const L = { name: 'meridian', spawns: [], brushes: [], triggers: [], props: [], billboards: [], line: [], altLine: [] };
+  const L = { name: 'meridian', spawns: [], brushes: [], triggers: [], props: [], billboards: [], line: [], altLine: [], edges: [] };
   const t = new Turtle(L);
   t.pos = [0, 0, 20000];
 
@@ -223,7 +234,7 @@ function meridian() {
     hi.boost(2400);
     hi.straight(1600, 500).turn(1, 45, 1800, 500).straight(1400, 400);
     hi.flush();
-    L.brushes.push(box([hi.pos[0], hi.pos[1], hi.pos[2]].map((v, i) => v - [300, 300, 400][i]), [hi.pos[0] + 300, hi.pos[1] + 300, hi.pos[2] - 300], '#2b3340'));
+    L.brushes.push(box([hi.pos[0], hi.pos[1], hi.pos[2]].map((v, i) => v - [300, 300, 400][i]), [hi.pos[0] + 300, hi.pos[1] + 300, hi.pos[2] - 300], '#5b6678'));
     t.stageMinZ = Math.min(t.stageMinZ, hi.stageMinZ);
   }
   t.pos = lowEnd; t.heading = lowHeading;
@@ -262,11 +273,13 @@ const L = meridian();
   for (const b of L.billboards) sh(b.pos);
   for (const p of L.line) sh(p);
   for (const p of L.altLine) sh(p);
+  for (const e of L.edges) e.pts.forEach(sh);
   const span = hi.map((h, i) => h - lo[i]);
   if (Math.max(...span) > 65000) throw new Error(`level too big for i16 positions: ${span}`);
 }
 const r = v => Math.round(v * 10) / 10;
 L.brushes.forEach(b => (b.verts = b.verts.map(v => v.map(r))));
 L.line = L.line.map(p => [r(p[0]), r(p[1]), r(p[2]), ...p.slice(3)]);
+L.edges.forEach(e => (e.pts = e.pts.map(p => p.map(r))));
 writeFileSync(new URL('./meridian.json', import.meta.url), JSON.stringify(L));
 console.log(`wrote levels/meridian.json: ${L.brushes.length} brushes, ${L.spawns.length} stages, ${L.billboards.length} billboards, line ${Math.round(lineLength(L.line))}u, minRunMs ${L.minRunMs}`);

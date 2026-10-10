@@ -17,6 +17,6 @@ FROM scratch
 COPY --from=server /app/server/target/x86_64-unknown-linux-musl/release/sky-surf-server /sky-surf-server
 COPY --from=client /app/client/dist /app/dist
 COPY levels /app/levels
-ENV STATIC_DIR=/app/dist LEVEL=/app/levels/cloud-harbor.json DATA_DIR=/data PORT=80
+ENV STATIC_DIR=/app/dist LEVEL=/app/levels/meridian.json DATA_DIR=/data PORT=80
 EXPOSE 80
 ENTRYPOINT ["/sky-surf-server"]

@@ -47,12 +47,18 @@ export type Trigger = {
   dir?: V3;    // boost
   speed?: number;
 };
+export type LinePoint = [number, number, number, number, ...string[]]; // x, y, z, stage, ('air')
 export type LevelJSON = {
   name: string;
   minRunMs?: number;
-  spawns: { pos: V3; yaw: number }[]; // index = stage
+  spawns: { pos: V3; yaw: number; name?: string }[]; // index = stage
   brushes: { verts: V3[]; color: string; chain?: boolean }[];
   triggers: Trigger[];
+  line?: LinePoint[];      // the ideal racing line (autopilot, ghost, flythrough)
+  altLine?: LinePoint[];
+  props?: any[];
+  billboards?: { id: number; pos: V3; yaw: number; w: number; h: number }[];
+  edges?: { color: 'cyan' | 'magenta'; pts: V3[] }[]; // neon strips
 };
 export type Level = { name: string; spawns: LevelJSON['spawns']; brushes: Brush[]; triggers: Trigger[] };
 
