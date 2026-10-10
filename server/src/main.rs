@@ -2,6 +2,7 @@ mod filter;
 mod game;
 mod images;
 mod level;
+mod npc;
 mod proto;
 
 use axum::{
@@ -35,8 +36,9 @@ async fn main() {
     let data_dir: std::path::PathBuf = env("DATA_DIR", "data").into();
     let max_per_ip = env("MAX_CONN_PER_IP", "8").parse().unwrap_or(8);
     let images = images::Store::new(Some(data_dir.join("img")));
+    let npcs = env("NPC_COUNT", "6").parse().unwrap_or(6);
     let (tx, rx) = mpsc::channel(65536);
-    tokio::spawn(game::Game::new(level, Some(data_dir), max_per_ip, images.clone()).run(rx));
+    tokio::spawn(game::Game::new(level, Some(data_dir), max_per_ip, images.clone(), npcs).run(rx));
 
     let app = App { tx, images, admin_token: std::env::var("ADMIN_TOKEN").ok().filter(|t| t.len() >= 16) };
     let frame_ancestors = env("FRAME_ANCESTORS", "'self' https://akdarrah.com https://www.akdarrah.com");
@@ -45,8 +47,8 @@ async fn main() {
         .route("/up", get(|| async { "ok" }))
         .route("/admin/ban", post(ban))
         .route("/admin/clear-images", post(clear_images))
-        .route("/admin/billboards", get(list_billboards))
-        .route("/admin/billboards/{slot}/remove", post(remove_billboard))
+        .route("/admin/walls", get(list_walls))
+        .route("/admin/walls/{id}/remove", post(remove_wall))
         .route("/img/{hash}", get(image))
         .fallback_service(ServeDir::new(env("STATIC_DIR", "client/dist")))
         .layer(SetResponseHeaderLayer::overriding(
@@ -159,19 +161,19 @@ async fn clear_images(State(app): State<App>, headers: HeaderMap) -> StatusCode 
     StatusCode::NO_CONTENT
 }
 
-async fn list_billboards(State(app): State<App>, headers: HeaderMap) -> Response {
+async fn list_walls(State(app): State<App>, headers: HeaderMap) -> Response {
     if !authorized(&app, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let (tx, rx) = oneshot::channel();
-    let _ = app.tx.send(Inbound::Admin(Admin::ListBillboards(tx))).await;
+    let _ = app.tx.send(Inbound::Admin(Admin::ListWalls(tx))).await;
     rx.await.map(Json).map_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response(), IntoResponse::into_response)
 }
 
-async fn remove_billboard(State(app): State<App>, headers: HeaderMap, Path(slot): Path<u32>) -> StatusCode {
+async fn remove_wall(State(app): State<App>, headers: HeaderMap, Path(id): Path<u32>) -> StatusCode {
     if !authorized(&app, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let _ = app.tx.send(Inbound::Admin(Admin::RemoveBillboard(slot))).await;
+    let _ = app.tx.send(Inbound::Admin(Admin::RemoveWall(id))).await;
     StatusCode::NO_CONTENT
 }

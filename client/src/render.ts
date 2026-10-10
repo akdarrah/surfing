@@ -17,8 +17,8 @@ export const CYAN = 0x35f0ff, MAGENTA = 0xff2bd6, AMBER = 0xffb000;
 const FONT = '"Rajdhani", "Bahnschrift", "DIN Alternate", "Segoe UI", system-ui, sans-serif';
 export const OCEAN_Z = -21000;
 
-export type Billboard = { slot: number; hash?: string | null; text: string; url?: string | null; name: string; sponsor: string; at?: number };
-type BillboardMesh = { mesh: THREE.Mesh; canvas: HTMLCanvasElement; tex: THREE.CanvasTexture; frame: THREE.Mesh; pos: V3; yaw: number; w: number; h: number };
+export type WallInfo = { id: number; hash: string; name: string; at?: number };
+type WallMesh = { mesh: THREE.Mesh; canvas: HTMLCanvasElement; tex: THREE.CanvasTexture; frame: THREE.Mesh; pos: V3; yaw: number; w: number; h: number; name: string };
 
 export class World {
   renderer: THREE.WebGPURenderer;
@@ -29,7 +29,11 @@ export class World {
   private uBlur = uniform(0);
   private uCA = uniform(0);
   private fx: { obj: THREE.Object3D; until: number; mat: THREE.Material; vel?: V3 }[] = [];
-  private billboards = new Map<number, BillboardMesh>();
+  private walls = new Map<number, WallMesh>();
+  private decals = new Map<string, THREE.Object3D>();
+  private drifters: { obj: THREE.Object3D; vel: V3; phase: number; kind: 'cloud' | 'whale' | 'bird' | 'wisp' }[] = [];
+  private wind: THREE.LineSegments | null = null;
+  private windPos: Float32Array | null = null;
   private boosters: THREE.Mesh[] = [];
   private gates: THREE.Mesh[] = [];
   private sun = new THREE.DirectionalLight(0xffd9a8, 3.2);
@@ -201,11 +205,18 @@ export class World {
       }
     }
 
-    for (const b of (json as any).billboards ?? []) this.makeBillboard(b.id, b.pos, b.yaw, b.w, b.h);
-    for (const slot of this.billboards.keys()) this.setBillboard(slot, null);
+    for (const w of (json as any).walls ?? []) this.makeWall(w.id, w.name, w.pos, w.yaw, w.w, w.h);
+    for (const id of this.walls.keys()) this.setWall(id, null);
+    for (const p of props) if (p.type === 'beacon') {
+      const b = new THREE.Mesh(new THREE.OctahedronGeometry(60), new THREE.MeshBasicNodeMaterial({ color: MAGENTA }));
+      b.position.set(p.pos[0], p.pos[1], p.pos[2]);
+      this.scene.add(b);
+      this.gates.push(b);
+    }
+    this.buildSky(json);
   }
 
-  private makeBillboard(slot: number, pos: V3, yaw: number, w: number, h: number) {
+  private makeWall(id: number, name: string, pos: V3, yaw: number, w: number, h: number) {
     const canvas = document.createElement('canvas');
     canvas.width = 1024; canvas.height = Math.round(1024 * h / w);
     const tex = new THREE.CanvasTexture(canvas);
@@ -215,57 +226,235 @@ export class World {
     group.position.set(pos[0], pos[1], pos[2]);
     const yr = yaw * Math.PI / 180;
     group.lookAt(pos[0] + Math.cos(yr), pos[1] + Math.sin(yr), pos[2]);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicNodeMaterial({ map: tex, transparent: true, opacity: 0.92, side: THREE.DoubleSide }));
-    const frame = new THREE.Mesh(new THREE.PlaneGeometry(w + 40, h + 40), new THREE.MeshBasicNodeMaterial({ color: slot === 0 ? AMBER : CYAN, side: THREE.DoubleSide }));
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicNodeMaterial({ map: tex, side: THREE.DoubleSide }));
+    const frame = new THREE.Mesh(new THREE.PlaneGeometry(w + 30, h + 30), new THREE.MeshStandardNodeMaterial({ color: 0x2a3140, metalness: 0.6, roughness: 0.5, side: THREE.DoubleSide }));
     frame.position.z = -1;
     const post = new THREE.Mesh(new THREE.CylinderGeometry(10, 12, h * 1.2), new THREE.MeshStandardNodeMaterial({ color: 0x3a4455, metalness: 0.3, roughness: 0.4 }));
     post.rotation.x = Math.PI / 2;
     post.position.set(pos[0], pos[1], pos[2] - h * 0.6 - 60);
     group.add(mesh, frame);
     this.scene.add(group, post);
-    this.billboards.set(slot, { mesh, canvas, tex, frame, pos, yaw, w, h });
+    this.walls.set(id, { mesh, canvas, tex, frame, pos, yaw, w, h, name });
   }
 
-  billboardPos(slot: number) { return this.billboards.get(slot); }
+  wallInfo(id: number) { return this.walls.get(id); }
 
-  // Paint a billboard's canvas: image (if any) + headline + name/sponsor. Slot 0 is the record holder.
-  setBillboard(slot: number, b: Billboard | null, img?: HTMLImageElement | ImageBitmap | null, recordMs?: number) {
-    const bb = this.billboards.get(slot);
-    if (!bb) return;
-    const { canvas, tex } = bb;
+  // Paint a spray wall: empty = bare panel inviting a spray; painted = the owner's spray with a small tag.
+  setWall(id: number, w: WallInfo | null, img?: ImageBitmap | null) {
+    const wall = this.walls.get(id);
+    if (!wall) return;
+    const { canvas, tex } = wall;
     const g = canvas.getContext('2d')!;
     const W = canvas.width, H = canvas.height;
-    g.fillStyle = '#060912';
+    // Brushed metal panel.
+    g.fillStyle = '#4c5566';
     g.fillRect(0, 0, W, H);
-    g.fillStyle = 'rgba(53,240,255,0.06)';
-    for (let y = 0; y < H; y += 6) g.fillRect(0, y, W, 2);
+    g.fillStyle = 'rgba(255,255,255,0.05)';
+    for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1);
+    g.fillStyle = 'rgba(0,0,0,0.25)';
+    for (let i = 0; i < 40; i++) g.fillRect((i * 173) % W, (i * 97) % H, 60 + (i * 37) % 200, 2);
     g.textAlign = 'center';
-    if (!b) {
-      g.fillStyle = slot === 0 ? '#ffb000' : '#35f0ff';
-      g.font = `700 ${Math.round(H * 0.16)}px ${FONT}`;
-      g.fillText(slot === 0 ? 'SERVER RECORD' : 'YOUR AD HERE', W / 2, H * 0.42);
-      g.font = `${Math.round(H * 0.1)}px ${FONT}`;
+    if (!w || !img) {
+      g.setLineDash([24, 16]); g.lineWidth = 8; g.strokeStyle = '#35f0ff';
+      g.strokeRect(30, 30, W - 60, H - 60);
+      g.setLineDash([]);
+      g.fillStyle = 'rgba(53,240,255,0.9)';
+      g.font = `700 ${Math.round(H * 0.22)}px ${FONT}`;
+      g.fillText('SPRAY HERE', W / 2, H * 0.5);
+      g.font = `${Math.round(H * 0.11)}px ${FONT}`;
       g.fillStyle = '#eef2f7';
-      g.fillText(slot === 0 ? 'SET THE FASTEST RUN' : 'WIN A ROUND', W / 2, H * 0.62);
+      g.fillText(`${wall.name.toUpperCase()}  ·  PRESS T`, W / 2, H * 0.68);
+      sprayCan(g, W / 2, H * 0.86, H * 0.09);
       tex.needsUpdate = true;
       return;
     }
-    const imgW = img ? W * 0.42 : 0;
-    if (img) {
-      g.drawImage(img, 24, 24, imgW - 24, H - 48);
-      g.strokeStyle = '#35f0ff'; g.lineWidth = 4; g.strokeRect(24, 24, imgW - 24, H - 48);
-    }
-    const cx = imgW + (W - imgW) / 2, tw = W - imgW - 60;
-    g.fillStyle = slot === 0 ? '#ffb000' : '#ff2bd6';
-    g.font = `${Math.round(H * 0.09)}px ${FONT}`;
-    g.fillText(slot === 0 ? `SERVER RECORD  ${recordMs !== undefined ? fmtMs(recordMs) : ''}` : 'ROUND WINNER', cx, H * 0.17);
+    // Owner's spray, contain-fit, with paint drips and a stencil tag.
+    const side = Math.min(W, H) * 0.92;
+    const x = (W - side) / 2, y = (H - side) / 2 - H * 0.04;
+    g.drawImage(img, x, y, side, side);
+    g.fillStyle = 'rgba(0,0,0,0.55)';
+    g.fillRect(0, H - H * 0.16, W, H * 0.16);
     g.fillStyle = '#ffffff';
-    g.font = `700 ${Math.round(H * 0.2)}px ${FONT}`;
-    g.fillText(fit(g, b.name.toUpperCase(), tw), cx, H * 0.4);
-    if (b.sponsor) { g.fillStyle = '#ffb000'; g.font = `${Math.round(H * 0.11)}px ${FONT}`; g.fillText(fit(g, b.sponsor, tw), cx, H * 0.55); }
-    if (b.text) { g.fillStyle = '#eef2f7'; g.font = `${Math.round(H * 0.1)}px ${FONT}`; wrap(g, b.text, cx, H * 0.72, tw, H * 0.12); }
-    if (b.url) { g.fillStyle = '#35f0ff'; g.font = `${Math.round(H * 0.075)}px ${FONT}`; g.fillText(fit(g, b.url, tw), cx, H * 0.95); }
+    g.font = `700 ${Math.round(H * 0.1)}px ${FONT}`;
+    g.fillText(fit(g, w.name.toUpperCase(), W * 0.8), W / 2, H - H * 0.045);
     tex.needsUpdate = true;
+  }
+
+  // A live spray decal on any surface (CS-style); one per player.
+  setDecal(key: string, tex: THREE.Texture, pos: V3, normal: V3, size: number) {
+    this.removeDecal(key);
+    const at = new THREE.Vector3(...pos).addScaledVector(new THREE.Vector3(...normal), 0.8);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicNodeMaterial({ map: tex, transparent: true, opacity: 0.95, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 }));
+    m.position.copy(at);
+    if (Math.abs(normal[2]) > 0.9) m.up.set(0, 1, 0);
+    m.lookAt(at.clone().add(new THREE.Vector3(...normal)));
+    this.scene.add(m);
+    this.decals.set(key, m);
+  }
+
+  removeDecal(key: string) {
+    const d = this.decals.get(key);
+    if (d) { this.scene.remove(d); this.decals.delete(key); }
+  }
+
+  // --- sky: clouds below and above, floating rocks, distant megastructures, a moon, birds, and the big ones --------
+  private buildSky(json: LevelJSON) {
+    const rnd = mulberry(11);
+    let lo = Infinity, hi = -Infinity;
+    for (const b of json.brushes) for (const v of b.verts) { lo = Math.min(lo, v[2]); hi = Math.max(hi, v[2]); }
+    const seaZ = lo - 4000;
+
+    // Cloud sea: big soft puffs drifting slowly, plus a dense deck far below.
+    const puffTex = puffTexture();
+    const cloudMat = new THREE.SpriteNodeMaterial({ map: puffTex, transparent: true, opacity: 0.85, depthWrite: false, color: 0xf4e4e8 });
+    for (let i = 0; i < 520; i++) {
+      const sp = new THREE.Sprite(cloudMat);
+      const r = 1800 + rnd() * 3200;
+      sp.scale.set(r, r * 0.42, 1);
+      sp.position.set(-30000 + rnd() * 60000, -36000 + rnd() * 72000, seaZ - 600 + rnd() * 2200 + (rnd() < 0.08 ? 6000 : 0));
+      this.scene.add(sp);
+      this.drifters.push({ obj: sp, vel: [30 + rnd() * 40, 10 - rnd() * 20, 0], phase: rnd() * 7, kind: 'cloud' });
+    }
+    const deck = new THREE.Mesh(new THREE.PlaneGeometry(240000, 240000), new THREE.MeshBasicNodeMaterial({ color: 0xd9c6cc, transparent: true, opacity: 0.9, map: deckTexture() }));
+    deck.position.z = seaZ - 2600;
+    this.scene.add(deck);
+    // Thin wisps above the course that the Launch gap flies through.
+    const wispMat = new THREE.SpriteNodeMaterial({ map: puffTex, transparent: true, opacity: 0.22, depthWrite: false, color: 0xffffff });
+    for (let i = 0; i < 90; i++) {
+      const sp = new THREE.Sprite(wispMat);
+      const r = 4000 + rnd() * 6000;
+      sp.scale.set(r, r * 0.18, 1);
+      sp.position.set(-20000 + rnd() * 40000, -26000 + rnd() * 52000, hi + 2500 + rnd() * 7000);
+      this.scene.add(sp);
+      this.drifters.push({ obj: sp, vel: [60 + rnd() * 60, 0, 0], phase: rnd() * 7, kind: 'wisp' });
+    }
+
+    // Floating rocks with mossy tops; a few carry beacons.
+    const rockMat = new THREE.MeshStandardNodeMaterial({ color: 0x4b4650, roughness: 0.95, flatShading: true });
+    const mossMat = new THREE.MeshStandardNodeMaterial({ color: 0x4f8a5a, roughness: 1, flatShading: true });
+    for (let i = 0; i < 44; i++) {
+      const size = 300 + rnd() * 900;
+      const geo = new THREE.IcosahedronGeometry(size, 1);
+      const pa = geo.attributes.position as THREE.BufferAttribute;
+      for (let k = 0; k < pa.count; k++) pa.setXYZ(k, pa.getX(k) * (0.7 + rnd() * 0.6), pa.getY(k) * (0.7 + rnd() * 0.6), pa.getZ(k) * (0.5 + rnd() * 0.5));
+      geo.computeVertexNormals();
+      const rock = new THREE.Mesh(geo, rockMat);
+      rock.position.set(-16000 + rnd() * 32000, -28000 + rnd() * 56000, lo + rnd() * (hi - lo));
+      rock.castShadow = rock.receiveShadow = true;
+      const moss = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.8, size * 0.9, size * 0.12, 7), mossMat);
+      moss.rotation.x = Math.PI / 2;
+      moss.position.z = size * 0.5;
+      rock.add(moss);
+      // Roots dangling below.
+      for (let r = 0; r < 3; r++) {
+        const root = new THREE.Mesh(new THREE.CylinderGeometry(4, 14, size * (1 + rnd())), rockMat);
+        root.rotation.x = Math.PI / 2 + (rnd() - 0.5) * 0.4;
+        root.position.set((rnd() - 0.5) * size, (rnd() - 0.5) * size, -size * (0.8 + rnd() * 0.6));
+        rock.add(root);
+      }
+      this.scene.add(rock);
+      this.drifters.push({ obj: rock, vel: [0, 0, 0], phase: rnd() * 7, kind: 'cloud' });
+    }
+
+    // Distant megastructures on the horizon with blinking lights.
+    for (let i = 0; i < 7; i++) {
+      const a = rnd() * Math.PI * 2, d = 90000 + rnd() * 60000, h = 40000 + rnd() * 50000;
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(1800 + rnd() * 2500, 2600 + rnd() * 3000, h, 10), new THREE.MeshStandardNodeMaterial({ color: 0x1b2030, roughness: 0.8, metalness: 0.2 }));
+      col.rotation.x = Math.PI / 2;
+      col.position.set(Math.cos(a) * d, Math.sin(a) * d, seaZ - 20000 + h / 2);
+      this.scene.add(col);
+      for (let k = 0; k < 5; k++) {
+        const light = new THREE.Mesh(new THREE.SphereGeometry(260), new THREE.MeshBasicNodeMaterial({ color: k % 2 ? 0xff3b3b : CYAN }));
+        light.position.set(col.position.x, col.position.y, seaZ - 20000 + h * (0.45 + k * 0.13));
+        this.scene.add(light);
+        this.gates.push(light);
+      }
+    }
+
+    // Moon.
+    const moon = new THREE.Sprite(new THREE.SpriteNodeMaterial({ map: moonTexture(), transparent: true, depthWrite: false, fog: false }));
+    moon.scale.set(46000, 46000, 1);
+    moon.position.set(120000, 230000, 90000);
+    this.scene.add(moon);
+
+    // The big ones: sky leviathans cruising the cloud sea, slow as weather. Megalophobia bait.
+    for (let i = 0; i < 4; i++) {
+      const L = 14000 + rnd() * 12000;
+      const whale = leviathan(L, rnd);
+      const a = rnd() * Math.PI * 2;
+      whale.position.set(-20000 + rnd() * 40000, -30000 + rnd() * 60000, seaZ - 1200 + rnd() * 3000 - (i === 0 ? 0 : 0));
+      whale.rotation.z = a;
+      this.scene.add(whale);
+      this.drifters.push({ obj: whale, vel: [Math.cos(a) * 140, Math.sin(a) * 140, 0], phase: rnd() * 7, kind: 'whale' });
+    }
+    // One colossus standing in the clouds on the horizon, a silhouette the size of a weather system.
+    this.scene.add(colossus(seaZ));
+
+    // Birds: a flock circling under the course.
+    const birdGeo = new THREE.BufferGeometry();
+    birdGeo.setAttribute('position', new THREE.Float32BufferAttribute([-40, 0, 0, 0, 0, 12, 40, 0, 0, 0, -22, -2, 0, 22, -2, 0, 0, 12], 3));
+    const birds = new THREE.InstancedMesh(birdGeo, new THREE.MeshBasicNodeMaterial({ color: 0x0c0f14, side: THREE.DoubleSide }), 36);
+    (birds as any).__center = [json.spawns[1]?.pos[0] ?? 0, json.spawns[1]?.pos[1] ?? 0, (json.spawns[1]?.pos[2] ?? 0) - 2500];
+    this.scene.add(birds);
+    this.drifters.push({ obj: birds, vel: [0, 0, 0], phase: 0, kind: 'bird' });
+
+    // Wind streaks around the camera, stretched by speed.
+    const N = 160;
+    this.windPos = new Float32Array(N * 6);
+    const wg = new THREE.BufferGeometry();
+    wg.setAttribute('position', new THREE.BufferAttribute(this.windPos, 3));
+    this.wind = new THREE.LineSegments(wg, new THREE.LineBasicNodeMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 }));
+    this.wind.frustumCulled = false;
+    this.scene.add(this.wind);
+  }
+
+  // Called per frame: drift clouds and leviathans, flap birds, blow wind past the camera.
+  tickSky(now: number, dt: number, speed: number, vel: V3) {
+    const camp = this.camera.position;
+    for (const d of this.drifters) {
+      const o = d.obj;
+      if (d.kind === 'cloud' || d.kind === 'wisp') {
+        o.position.x += d.vel[0] * dt; o.position.y += d.vel[1] * dt;
+        if (o.position.x > 34000) o.position.x = -34000;
+        if (d.kind === 'cloud' && !(o as any).isSprite) o.position.z += Math.sin(now * 0.3 + d.phase) * 0.4;
+      } else if (d.kind === 'whale') {
+        o.position.x += d.vel[0] * dt; o.position.y += d.vel[1] * dt;
+        o.position.z += Math.sin(now * 0.25 + d.phase) * 2.5;
+        if (Math.hypot(o.position.x, o.position.y) > 46000) { o.rotation.z += Math.PI; d.vel = [-d.vel[0], -d.vel[1], 0]; }
+        const tail = o.getObjectByName('tail');
+        if (tail) tail.rotation.y = Math.sin(now * 0.6 + d.phase) * 0.25;
+      } else if (d.kind === 'bird') {
+        const im = o as THREE.InstancedMesh;
+        const c = (im as any).__center as V3;
+        const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(1, 1, 1);
+        for (let i = 0; i < im.count; i++) {
+          const a = now * 0.35 + i * 0.37, r = 1500 + (i % 7) * 260;
+          p.set(c[0] + Math.cos(a) * r, c[1] + Math.sin(a) * r, c[2] + Math.sin(now + i) * 200 + (i % 5) * 120);
+          q.setFromEuler(new THREE.Euler(Math.sin(now * 9 + i) * 0.5, 0, a + Math.PI / 2));
+          im.setMatrixAt(i, m.compose(p, q, sc));
+        }
+        im.instanceMatrix.needsUpdate = true;
+      }
+    }
+    if (this.wind && this.windPos) {
+      const k = Math.max(0, (speed - 700) / 2500);
+      const len = 30 + k * 400;
+      for (let i = 0; i < this.windPos.length / 6; i++) {
+        const o = i * 6;
+        // Respawn streaks that fell behind; keep them in a box around the camera.
+        if (this.windPos[o] === 0 || Math.abs(this.windPos[o] - camp.x) > 900 || Math.abs(this.windPos[o + 1] - camp.y) > 900 || Math.abs(this.windPos[o + 2] - camp.z) > 900) {
+          this.windPos[o] = camp.x + (Math.random() - 0.5) * 1600 + vel[0] * 0.5;
+          this.windPos[o + 1] = camp.y + (Math.random() - 0.5) * 1600 + vel[1] * 0.5;
+          this.windPos[o + 2] = camp.z + (Math.random() - 0.5) * 1200 + vel[2] * 0.5;
+        }
+        const vl = Math.max(1, Math.hypot(vel[0], vel[1], vel[2]));
+        this.windPos[o + 3] = this.windPos[o] - vel[0] / vl * len;
+        this.windPos[o + 4] = this.windPos[o + 1] - vel[1] / vl * len;
+        this.windPos[o + 5] = this.windPos[o + 2] - vel[2] / vl * len;
+      }
+      (this.wind.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (this.wind.material as any).opacity = Math.min(0.5, k * 0.6);
+    }
   }
 
   sparks(at: V3, dir: V3, n: number, color = CYAN) {
@@ -298,7 +487,7 @@ export class World {
       else f.obj.scale.multiplyScalar(1 + dt * 1.5);
       return true;
     });
-    for (const [slot, b] of this.billboards) (b.mesh.material as any).opacity = 0.86 + 0.08 * Math.sin(now * 17 + slot) + (Math.random() < 0.01 ? -0.3 : 0);
+    void now;
     for (const g of this.gates) g.rotation.z += dt * 0.4;
     for (const b of this.boosters) (b.material as any).opacity = 0.6 + 0.35 * Math.abs(Math.sin(now * 6));
     if (this.water && 'time' in (this.water as any)) (this.water as any).time.value += dt;
@@ -563,4 +752,122 @@ function mulberry(a: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+
+function puffTexture() {
+  return canvasTexture(256, 256, g => {
+    const r = g.createRadialGradient(128, 128, 10, 128, 128, 128);
+    r.addColorStop(0, 'rgba(255,255,255,0.95)'); r.addColorStop(0.45, 'rgba(255,255,255,0.55)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 256, 256);
+  });
+}
+
+function deckTexture() {
+  const t = canvasTexture(512, 512, g => {
+    const rnd = mulberry(5);
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 900; i++) {
+      const r = 10 + rnd() * 60;
+      const grad = g.createRadialGradient(0, 0, 0, 0, 0, r);
+      grad.addColorStop(0, 'rgba(190,170,180,0.35)'); grad.addColorStop(1, 'rgba(190,170,180,0)');
+      g.save(); g.translate(rnd() * 512, rnd() * 512); g.fillStyle = grad; g.fillRect(-r, -r, r * 2, r * 2); g.restore();
+    }
+  });
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(14, 14);
+  return t;
+}
+
+function moonTexture() {
+  return canvasTexture(256, 256, g => {
+    const r = g.createRadialGradient(118, 118, 20, 128, 128, 120);
+    r.addColorStop(0, 'rgba(236,230,240,1)'); r.addColorStop(0.85, 'rgba(206,196,216,0.9)'); r.addColorStop(1, 'rgba(206,196,216,0)');
+    g.fillStyle = r; g.beginPath(); g.arc(128, 128, 118, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(120,110,140,0.25)';
+    for (const [x, y, s] of [[90, 100, 22], [150, 80, 14], [160, 150, 28], [100, 170, 12]]) { g.beginPath(); g.arc(x, y, s, 0, Math.PI * 2); g.fill(); }
+  });
+}
+
+// A sky leviathan: a long, smooth body with pectoral fins and a tail fluke. Dark against the clouds, lit from above.
+function leviathan(L: number, rnd: () => number) {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshStandardNodeMaterial({ color: 0x1a2130, roughness: 0.85, metalness: 0.05, flatShading: false });
+  const belly = new THREE.MeshStandardNodeMaterial({ color: 0x5a6a86, roughness: 0.9 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), skin);
+  body.scale.set(L / 2, L / 7, L / 8);
+  const under = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), belly);
+  under.scale.set(L / 2.1, L / 7.5, L / 9);
+  under.position.z = -L / 60;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), skin);
+  head.scale.set(L / 7, L / 7.5, L / 9);
+  head.position.x = L / 2.4;
+  const finGeo = new THREE.ConeGeometry(L / 14, L / 3.2, 6);
+  for (const s of [-1, 1]) {
+    const fin = new THREE.Mesh(finGeo, skin);
+    fin.rotation.x = s * Math.PI / 2;
+    fin.rotation.z = s * -0.5;
+    fin.position.set(L / 8, s * L / 7, -L / 40);
+    fin.scale.set(0.5, 1, 1.4);
+    g.add(fin);
+  }
+  const tail = new THREE.Group();
+  tail.name = 'tail';
+  tail.position.x = -L / 2.1;
+  for (const s of [-1, 1]) {
+    const fluke = new THREE.Mesh(finGeo, skin);
+    fluke.rotation.z = Math.PI / 2 + s * 0.6;
+    fluke.position.set(-L / 10, s * L / 8, 0);
+    fluke.scale.set(0.35, 1.1, 1.2);
+    tail.add(fluke);
+  }
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(L / 120), new THREE.MeshBasicNodeMaterial({ color: 0xffd27a }));
+  for (const s of [-1, 1]) { const e = eye.clone(); e.position.set(L / 2.2, s * L / 11, L / 40); g.add(e); }
+  // Bioluminescent lines along the flank.
+  for (let i = 0; i < 9; i++) {
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(L / 160), new THREE.MeshBasicNodeMaterial({ color: CYAN }));
+    for (const s of [-1, 1]) { const d = dot.clone(); d.position.set(L / 2.6 - i * L / 10, s * L / 7.3, 0); g.add(d); }
+  }
+  g.add(body, under, head, tail);
+  void rnd;
+  return g;
+}
+
+// A colossus wading in the cloud sea on the horizon: head, shoulders and one raised arm, pure silhouette in the haze.
+function colossus(seaZ: number) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardNodeMaterial({ color: 0x141821, roughness: 1 });
+  const H = 70000;
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(H * 0.12, H * 0.16, H * 0.5, 9), mat);
+  torso.rotation.x = Math.PI / 2;
+  torso.position.z = H * 0.25;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(H * 0.085, 10, 8), mat);
+  head.position.z = H * 0.56;
+  const shoulderL = new THREE.Mesh(new THREE.SphereGeometry(H * 0.08, 8, 6), mat);
+  shoulderL.position.set(-H * 0.17, 0, H * 0.47);
+  const shoulderR = shoulderL.clone();
+  shoulderR.position.x = H * 0.17;
+  const arm = new THREE.Mesh(new THREE.CylinderGeometry(H * 0.04, H * 0.05, H * 0.5, 8), mat);
+  arm.position.set(H * 0.22, 0, H * 0.66);
+  arm.rotation.z = -0.25;
+  arm.rotation.x = Math.PI / 2;
+  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(H * 0.012), new THREE.MeshBasicNodeMaterial({ color: 0xff3b3b, fog: false }));
+  eyeL.position.set(-H * 0.03, -H * 0.07, H * 0.57);
+  const eyeR = eyeL.clone(); eyeR.position.x = H * 0.03;
+  g.add(torso, head, shoulderL, shoulderR, arm, eyeL, eyeR);
+  g.position.set(-150000, 170000, seaZ - H * 0.12);
+  g.rotation.z = -0.6;
+  return g;
+}
+
+// A little spray-can glyph for empty walls.
+function sprayCan(g: CanvasRenderingContext2D, x: number, y: number, r: number) {
+  g.fillStyle = '#eef2f7';
+  g.fillRect(x - r * 0.5, y - r, r, r * 2);
+  g.fillStyle = '#ff2bd6';
+  g.fillRect(x - r * 0.5, y - r * 1.5, r, r * 0.5);
+  g.fillStyle = '#35f0ff';
+  g.fillRect(x - r * 0.15, y - r * 1.8, r * 0.3, r * 0.3);
+  g.fillStyle = 'rgba(53,240,255,0.5)';
+  for (let i = 0; i < 6; i++) { g.beginPath(); g.arc(x + r * (0.9 + i * 0.35), y - r * (1.7 + Math.sin(i) * 0.3), r * (0.12 + i * 0.05), 0, Math.PI * 2); g.fill(); }
 }

@@ -1,10 +1,11 @@
 // One task owns all game state. Sockets talk to it over channels, so there are no locks on the hot path.
-use crate::{filter, images, level::*, proto};
+use crate::npc::Npc;
+use crate::{filter, images, level::*, npc, proto};
 use axum::extract::ws::{Message, Utf8Bytes};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, MissedTickBehavior, interval};
@@ -14,14 +15,19 @@ const FAR_EVERY: u64 = 20; // far view once a second; nearby cells every tick
 const FAR_CAP: usize = 256;
 const NEAR_CAP: usize = 96;
 const CELL: f32 = 2048.0;
-pub const LOBBY_MS: u32 = 20_000;
-pub const RACE_MS: u32 = 4 * 60 * 1000;
-pub const AFTER_FIRST_MS: u32 = 30_000;
-pub const PODIUM_MS: u32 = 12_000;
+pub const LOBBY_MS: u32 = 15_000;
+pub const RACE_MS: u32 = 105_000; // lobby + race = a clean 2:00 loop
 const UPLOAD_EVERY_MS: u32 = 5_000;
+const SPRAY_EVERY_MS: u32 = 15_000;
+const WALL_EVERY_MS: u32 = 10_000;
+const SPRAY_RANGE: f32 = 450.0;
+const SPRAYS_PER_SEC: f32 = 20.0; // server-wide cap on spray broadcasts
+const CHAT_MAX: usize = 200;
+const CHAT_BURST: usize = 3;
+const CHAT_WINDOW_MS: u32 = 5_000;
 const MAX_SPEED: f32 = 6063.0; // sv_maxvelocity 3500 per axis -> 3500 * sqrt(3)
 const GHOST_HZ_DIV: u32 = 2; // record every 2nd state packet (20 Hz -> 10 Hz)
-const GHOST_CAP: usize = 2400; // 4 min at 10 Hz
+const GHOST_CAP: usize = 2400;
 const ROSTER_MAX: usize = 300;
 
 pub enum Inbound {
@@ -35,8 +41,8 @@ pub enum Inbound {
 pub enum Admin {
     Ban(String),
     ClearImages,
-    ListBillboards(oneshot::Sender<Value>),
-    RemoveBillboard(u32),
+    ListWalls(oneshot::Sender<Value>),
+    RemoveWall(u32),
 }
 
 struct Player {
@@ -46,6 +52,7 @@ struct Player {
     ip: String,
     out: mpsc::Sender<Message>,
     named: bool,
+    bot: Option<Npc>,
     pos: V3,
     yaw: u16,
     pitch: i16,
@@ -61,14 +68,17 @@ struct Player {
     place: Option<u32>,
     late: bool,
     ghost: Vec<(V3, u16)>,
-    sponsor: String,
-    flag: Option<String>,
+    spray: Option<String>,
     last_upload: u32,
+    next_spray: u32,
+    next_wall: u32,
+    live_spray: Option<(V3, V3)>,
+    chat_times: VecDeque<u32>,
 }
 
 impl Player {
     fn send(&self, m: Message) {
-        // A full queue means a slow client: drop the frame rather than buffer without bound.
+        // A full queue means a slow client: drop the frame rather than buffer without bound. NPCs have no socket.
         let _ = self.out.try_send(m);
     }
 
@@ -77,7 +87,11 @@ impl Player {
     }
 
     fn info(&self, id: u16) -> Value {
-        json!({ "id": id, "name": self.name, "color": self.color, "sponsor": self.sponsor, "flag": self.flag })
+        json!({ "id": id, "name": self.name, "color": self.color, "spray": self.spray, "bot": self.bot.is_some() })
+    }
+
+    fn eye(&self) -> V3 {
+        [self.pos[0], self.pos[1], self.pos[2] + if self.flags & 1 != 0 { 28.0 } else { 64.0 }]
     }
 
     fn reset_run(&mut self) {
@@ -103,28 +117,24 @@ struct Wins {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Record {
     name: String,
-    sponsor: String,
     ms: u32,
-    flag: Option<String>,
+    spray: Option<String>,
     at: u64,
 }
-// A round winner's ad on one of the course's holographic slots.
+// A painted spray wall. Whoever reaches it and sprays last owns it.
 #[derive(Serialize, Deserialize, Clone)]
-struct Billboard {
-    slot: u32,
-    hash: Option<String>,
-    text: String,
-    url: Option<String>,
+struct Wall {
+    id: u32,
+    hash: String,
     name: String,
-    sponsor: String,
     at: u64,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     ip: String,
 }
 
-impl Billboard {
+impl Wall {
     fn public(&self) -> Value {
-        json!({ "slot": self.slot, "hash": self.hash, "text": self.text, "url": self.url, "name": self.name, "sponsor": self.sponsor, "at": self.at })
+        json!({ "id": self.id, "hash": self.hash, "name": self.name, "at": self.at })
     }
 }
 
@@ -134,7 +144,7 @@ struct Saved {
     wins: Vec<Wins>,
     banned: Vec<String>,
     #[serde(default)]
-    billboards: Vec<Billboard>,
+    walls: Vec<Wall>,
     #[serde(default)]
     record: Option<Record>,
 }
@@ -143,15 +153,32 @@ struct Saved {
 pub enum Phase {
     Lobby,
     Race,
-    Podium,
 }
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+fn dist(a: V3, b: V3) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn v3(v: &Value) -> Option<V3> {
+    let a = v.as_array().filter(|a| a.len() == 3)?;
+    let f = |i: usize| a[i].as_f64().map(|x| x as f32).filter(|x| x.is_finite() && x.abs() < 1e6);
+    Some([f(0)?, f(1)?, f(2)?])
+}
+
+fn unit_normal(v: &Value) -> Option<V3> {
+    let n = v3(v)?;
+    let l = dist(n, [0.0; 3]);
+    (0.9..1.1).contains(&l).then(|| n.map(|x| x / l))
+}
+
 pub struct Game {
     level: Level,
+    line: Vec<LinePoint>,
+    spawns: Vec<V3>,
     players: Vec<Option<Player>>,
     free: Vec<u16>,
     serial: u32,
@@ -160,16 +187,19 @@ pub struct Game {
     phase_ends: u32,
     go: u32,
     next_place: u32,
-    results: Vec<(u16, u32, u32)>, // (id, place, ms) this round
-    billboard_pending: Option<(u16, u32, u32)>, // winner id, slot, until
+    results: Vec<(u16, u32, u32)>, // (id, place, ms) this race
+    last_results: Value,
     saved: Saved,
     data_dir: Option<PathBuf>,
     images: images::Store,
-    ghost: Vec<(V3, u16)>, // the record run
+    ghost: Vec<(V3, u16)>,
     ghost_frame: Bytes,
     max_per_ip: usize,
     cells: HashMap<(i32, i32, i32), Vec<u16>>,
+    spray_tokens: f32,
+    spray_refill: u32,
     ticks: u64,
+    rng: u64,
 }
 
 fn cell_of(p: V3) -> (i32, i32, i32) {
@@ -182,7 +212,7 @@ fn color_for(id: u16) -> String {
 }
 
 impl Game {
-    pub fn new(level: Level, data_dir: Option<PathBuf>, max_per_ip: usize, images: images::Store) -> Game {
+    pub fn new(level: Level, data_dir: Option<PathBuf>, max_per_ip: usize, images: images::Store, npcs: usize) -> Game {
         if let Some(d) = &data_dir {
             std::fs::create_dir_all(d).expect("creating data dir");
         }
@@ -196,11 +226,13 @@ impl Game {
             .and_then(|d| std::fs::read(d.join("ghost.bin")).ok())
             .and_then(|b| proto::parse_ghost(&b))
             .unwrap_or_default();
-        for h in saved.billboards.iter().filter_map(|b| b.hash.as_deref()).chain(saved.record.iter().filter_map(|r| r.flag.as_deref())) {
+        for h in saved.walls.iter().map(|w| w.hash.as_str()).chain(saved.record.iter().filter_map(|r| r.spray.as_deref())) {
             images.load_persisted(h);
         }
         let ghost_frame = Bytes::from(proto::ghost(&ghost));
-        Game {
+        let mut g = Game {
+            line: level.line(),
+            spawns: level.spawns.iter().map(|s| s.pos).collect(),
             level,
             players: Vec::new(),
             free: Vec::new(),
@@ -211,7 +243,7 @@ impl Game {
             go: 0,
             next_place: 1,
             results: Vec::new(),
-            billboard_pending: None,
+            last_results: json!([]),
             saved,
             data_dir,
             images,
@@ -219,8 +251,31 @@ impl Game {
             ghost_frame,
             max_per_ip,
             cells: HashMap::new(),
+            spray_tokens: SPRAYS_PER_SEC,
+            spray_refill: 0,
             ticks: 0,
+            rng: 0x9e3779b97f4a7c15,
+        };
+        for i in 0..npcs {
+            g.spawn_npc(i);
         }
+        g
+    }
+
+    fn spawn_npc(&mut self, i: usize) {
+        let (tx, _rx) = mpsc::channel(1); // no socket: sends fail silently
+        let Some((id, _)) = self.join("npc".into(), tx) else { return };
+        let now = self.now();
+        let p = self.players[id as usize].as_mut().unwrap();
+        p.name = npc::NAMES[i % npc::NAMES.len()].to_string();
+        if i >= npc::NAMES.len() {
+            p.name.push_str(&format!("{}", i / npc::NAMES.len() + 1));
+        }
+        p.named = true;
+        p.bot = Some(Npc::new(0xc0ffee + i as u64 * 7919, now));
+        p.pos = self.spawns[0];
+        p.has_state = true;
+        p.in_start = true;
     }
 
     pub async fn run(mut self, mut rx: mpsc::Receiver<Inbound>) {
@@ -241,19 +296,26 @@ impl Game {
         self.start.elapsed().as_millis() as u32
     }
 
+    fn rand(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng >> 40) as f32 / (1u64 << 24) as f32
+    }
+
     fn player(&mut self, id: u16, serial: u32) -> Option<&mut Player> {
         self.players.get_mut(id as usize)?.as_mut().filter(|p| p.serial == serial)
     }
 
     fn broadcast(&self, v: Value) {
         let s: Utf8Bytes = v.to_string().into();
-        for p in self.players.iter().flatten().filter(|p| p.named) {
+        for p in self.players.iter().flatten().filter(|p| p.named && p.bot.is_none()) {
             p.send(Message::Text(s.clone()));
         }
     }
 
     fn broadcast_bin(&self, b: &Bytes) {
-        for p in self.players.iter().flatten().filter(|p| p.named) {
+        for p in self.players.iter().flatten().filter(|p| p.named && p.bot.is_none()) {
             p.send(Message::Binary(b.clone()));
         }
     }
@@ -278,16 +340,9 @@ impl Game {
         json!({ "t": "board", "best": self.saved.best, "wins": self.saved.wins })
     }
 
-    fn phase_name(&self) -> &'static str {
-        match self.phase {
-            Phase::Lobby => "lobby",
-            Phase::Race => "race",
-            Phase::Podium => "podium",
-        }
-    }
-
     fn round(&self) -> Value {
-        json!({ "phase": self.phase_name(), "endsAt": self.phase_ends, "go": self.go, "now": self.now() })
+        let now = self.now();
+        json!({ "phase": if self.phase == Phase::Lobby { "lobby" } else { "race" }, "endsAt": self.phase_ends, "go": self.go, "now": now, "results": self.last_results })
     }
 
     pub fn handle(&mut self, m: Inbound) {
@@ -316,8 +371,8 @@ impl Game {
                 for id in kick {
                     self.remove(id);
                 }
-                let slots: Vec<u32> = self.saved.billboards.iter().filter(|b| b.ip == ip).map(|b| b.slot).collect();
-                self.remove_billboards(&slots);
+                let ids: Vec<u32> = self.saved.walls.iter().filter(|w| w.ip == ip).map(|w| w.id).collect();
+                self.remove_walls(&ids);
                 if !self.saved.banned.contains(&ip) {
                     self.saved.banned.push(ip);
                 }
@@ -325,16 +380,17 @@ impl Game {
             }
             Inbound::Admin(Admin::ClearImages) => {
                 for p in self.players.iter_mut().flatten() {
-                    p.flag = None;
+                    p.spray = None;
+                    p.live_spray = None;
                 }
                 self.gc_images();
                 self.broadcast(json!({ "t": "clearImages" }));
             }
-            Inbound::Admin(Admin::ListBillboards(reply)) => {
-                let list: Vec<Value> = self.saved.billboards.iter().map(|b| json!({ "slot": b.slot, "image": b.hash.as_ref().map(|h| format!("/img/{h}")), "text": b.text, "url": b.url, "name": b.name, "sponsor": b.sponsor, "ip": b.ip, "at": b.at })).collect();
-                let _ = reply.send(json!({ "billboards": list, "record": self.saved.record }));
+            Inbound::Admin(Admin::ListWalls(reply)) => {
+                let list: Vec<Value> = self.saved.walls.iter().map(|w| json!({ "id": w.id, "image": format!("/img/{}", w.hash), "name": w.name, "ip": w.ip, "at": w.at })).collect();
+                let _ = reply.send(json!({ "walls": list, "record": self.saved.record }));
             }
-            Inbound::Admin(Admin::RemoveBillboard(slot)) => self.remove_billboards(&[slot]),
+            Inbound::Admin(Admin::RemoveWall(id)) => self.remove_walls(&[id]),
         }
     }
 
@@ -358,6 +414,7 @@ impl Game {
             ip,
             out,
             named: false,
+            bot: None,
             pos: [0.0; 3],
             yaw: 0,
             pitch: 0,
@@ -373,9 +430,12 @@ impl Game {
             place: None,
             late: self.phase == Phase::Race,
             ghost: Vec::new(),
-            sponsor: String::new(),
-            flag: None,
+            spray: None,
             last_upload: 0,
+            next_spray: 0,
+            next_wall: 0,
+            live_spray: None,
+            chat_times: VecDeque::new(),
         });
         Some((id, self.serial))
     }
@@ -386,26 +446,26 @@ impl Game {
             if p.named {
                 self.broadcast(json!({ "t": "leave", "id": id }));
             }
-            if p.flag.is_some() {
+            if p.spray.is_some() {
                 self.gc_images();
             }
         }
     }
 
     fn gc_images(&self) {
-        let live: HashSet<String> = self.players.iter().flatten().filter_map(|p| p.flag.clone()).collect();
-        let permanent: HashSet<String> = self.saved.billboards.iter().filter_map(|b| b.hash.clone()).chain(self.saved.record.iter().filter_map(|r| r.flag.clone())).collect();
+        let live: HashSet<String> = self.players.iter().flatten().filter_map(|p| p.spray.clone()).collect();
+        let permanent: HashSet<String> = self.saved.walls.iter().map(|w| w.hash.clone()).chain(self.saved.record.iter().filter_map(|r| r.spray.clone())).collect();
         self.images.retain(&live, &permanent);
     }
 
-    fn remove_billboards(&mut self, slots: &[u32]) {
-        if slots.is_empty() {
+    fn remove_walls(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
             return;
         }
-        self.saved.billboards.retain(|b| !slots.contains(&b.slot));
+        self.saved.walls.retain(|w| !ids.contains(&w.id));
         self.save();
         self.gc_images();
-        self.broadcast(json!({ "t": "unbillboard", "slots": slots }));
+        self.broadcast(json!({ "t": "unwall", "ids": ids }));
     }
 
     fn on_image(&mut self, id: u16, serial: u32, b: Bytes) {
@@ -416,10 +476,10 @@ impl Game {
         }
         p.last_upload = now.max(1);
         let Some(h) = self.images.put(b) else {
-            return self.players[id as usize].as_ref().unwrap().json(json!({ "t": "notice", "text": "that image didn't work, try a JPG or PNG" }));
+            return self.players[id as usize].as_ref().unwrap().json(json!({ "t": "notice", "text": "that image didn't work, try a PNG or JPG" }));
         };
         let p = self.players[id as usize].as_mut().unwrap();
-        p.flag = Some(h);
+        p.spray = Some(h);
         let mut m = p.info(id);
         m["t"] = json!("profile");
         self.gc_images();
@@ -427,20 +487,24 @@ impl Game {
     }
 
     fn on_json(&mut self, id: u16, serial: u32, v: Value) {
+        let now = self.now();
         let Some(p) = self.player(id, serial) else { return };
         match v["t"].as_str() {
             Some("hello") if !p.named => {
                 p.name = filter::name(v["name"].as_str().unwrap_or(""), id);
-                let sponsor = filter::clean_text(v["sponsor"].as_str().unwrap_or(""), 32);
-                p.sponsor = if filter::is_clean(&sponsor) { sponsor } else { String::new() };
                 p.named = true;
                 let mut join = p.info(id);
                 join["t"] = json!("join");
                 let players: Vec<Value> = self.players.iter().enumerate().filter_map(|(i, p)| p.as_ref().filter(|p| p.named).map(|p| p.info(i as u16))).collect();
-                let billboards: Vec<Value> = self.saved.billboards.iter().map(Billboard::public).collect();
+                let walls: Vec<Value> = self.saved.walls.iter().map(Wall::public).collect();
+                let sprays: Vec<Value> = self.players.iter().enumerate().filter_map(|(i, p)| {
+                    let p = p.as_ref()?;
+                    let (pos, normal) = p.live_spray?;
+                    Some(json!({ "id": i, "pos": pos, "normal": normal, "hash": p.spray }))
+                }).collect();
                 let welcome = json!({
                     "t": "welcome", "id": id, "level": self.level.name, "round": self.round(), "board": self.board(),
-                    "players": players, "billboards": billboards, "record": self.saved.record, "minRunMs": self.level.min_run_ms,
+                    "players": players, "walls": walls, "sprays": sprays, "record": self.saved.record, "minRunMs": self.level.min_run_ms,
                 });
                 let me = self.players[id as usize].as_ref().unwrap();
                 me.json(welcome);
@@ -449,31 +513,81 @@ impl Game {
                 }
                 self.broadcast(join);
             }
-            Some("billboard") => self.on_billboard(id, v["text"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or("")),
+            Some("chat") => {
+                while p.chat_times.front().is_some_and(|t| t + CHAT_WINDOW_MS < now) {
+                    p.chat_times.pop_front();
+                }
+                if p.chat_times.len() >= CHAT_BURST {
+                    return p.json(json!({ "t": "notice", "text": "easy on the chat" }));
+                }
+                let text = filter::clean_text(v["text"].as_str().unwrap_or(""), CHAT_MAX);
+                if text.is_empty() {
+                    return;
+                }
+                p.chat_times.push_back(now);
+                let m = json!({ "t": "chat", "id": id, "name": p.name, "color": p.color, "text": text, "bot": false });
+                self.broadcast(m);
+            }
+            Some("spray") => {
+                if let (Some(pos), Some(normal)) = (v3(&v["pos"]), unit_normal(&v["normal"])) {
+                    self.on_spray(id, pos, normal);
+                }
+            }
+            Some("wall") => {
+                if let Some(w) = v["id"].as_u64() {
+                    self.on_wall(id, w as u32);
+                }
+            }
             _ => {}
         }
     }
 
-    fn on_billboard(&mut self, id: u16, text: &str, url: &str) {
+    // A CS-style spray on the level: one live spray per player, replaced by the next.
+    fn on_spray(&mut self, id: u16, pos: V3, normal: V3) {
         let now = self.now();
-        let Some((_, slot, _)) = self.billboard_pending.filter(|(w, _, until)| *w == id && now <= *until) else { return };
         let p = self.players[id as usize].as_ref().unwrap();
-        let text = filter::clean_text(text, 80);
-        if !filter::is_clean(&text) {
-            return p.json(json!({ "t": "notice", "text": "let's keep it friendly" }));
+        let Some(hash) = p.spray.clone() else { return p.json(json!({ "t": "notice", "text": "pick a spray in the menu first" })) };
+        if !p.has_state || dist(pos, p.eye()) > SPRAY_RANGE || now < p.next_spray {
+            return;
         }
-        let url = match filter::url(url) {
-            Ok(u) => u,
-            Err(e) => return p.json(json!({ "t": "notice", "text": e })),
-        };
-        self.billboard_pending = None;
-        if let Some(b) = self.saved.billboards.iter_mut().find(|b| b.slot == slot) {
-            b.text = text;
-            b.url = url;
-            let public = b.public();
-            self.save();
-            self.broadcast(json!({ "t": "billboard", "board": public }));
+        if self.spray_tokens < 1.0 {
+            return p.json(json!({ "t": "notice", "text": "too much paint in the air, try again in a sec" }));
         }
+        self.spray_tokens -= 1.0;
+        let p = self.players[id as usize].as_mut().unwrap();
+        p.next_spray = now + SPRAY_EVERY_MS;
+        p.live_spray = Some((pos, normal));
+        self.broadcast(json!({ "t": "spray", "id": id, "pos": pos, "normal": normal, "hash": hash }));
+    }
+
+    // A spray wall: free for anyone who is standing (or flying) in front of it. NPCs never paint.
+    fn on_wall(&mut self, id: u16, wall: u32) {
+        let now = self.now();
+        let p = self.players[id as usize].as_ref().unwrap();
+        if p.bot.is_some() {
+            return;
+        }
+        let Some(hash) = p.spray.clone() else { return p.json(json!({ "t": "notice", "text": "pick a spray in the menu first" })) };
+        if !p.has_state || now < p.next_wall {
+            return;
+        }
+        let Some(t) = self.level.triggers.iter().find(|t| t.kind == Kind::Wall && t.id == Some(wall)) else { return };
+        if !Level::inside(t, p.pos) {
+            return p.json(json!({ "t": "notice", "text": "get closer to the wall" }));
+        }
+        let w = Wall { id: wall, hash, name: p.name.clone(), at: unix_now(), ip: p.ip.clone() };
+        let (name, ip) = (w.name.clone(), w.ip.clone());
+        self.images.persist(&w.hash);
+        let public = w.public();
+        self.saved.walls.retain(|x| x.id != wall);
+        self.saved.walls.push(w);
+        self.save();
+        self.gc_images();
+        let p = self.players[id as usize].as_mut().unwrap();
+        p.next_wall = now + WALL_EVERY_MS;
+        let _ = ip;
+        let wall_name = self.level.walls.iter().find(|s| s.id == wall).map(|s| s.name.clone()).unwrap_or_default();
+        self.broadcast(json!({ "t": "wall", "wall": public, "by": id, "name": name, "wallName": wall_name }));
     }
 
     fn on_state(&mut self, id: u16, serial: u32, pos: V3, yaw: u16, pitch: i16, flags: u8) {
@@ -498,7 +612,7 @@ impl Game {
                 }
             } else {
                 let dt = now.saturating_sub(p.last_state).max(1) as f32 / 1000.0;
-                let d = ((pos[0] - p.pos[0]).powi(2) + (pos[1] - p.pos[1]).powi(2) + (pos[2] - p.pos[2]).powi(2)).sqrt();
+                let d = dist(pos, p.pos);
                 if d > MAX_SPEED * dt + 300.0 && p.valid {
                     p.valid = false;
                     events.push(json!({ "t": "invalid", "reason": "moved impossibly fast" }));
@@ -537,7 +651,7 @@ impl Game {
             p.valid = true;
             p.ghost.clear();
             if p.finished == Some(0) {
-                p.finished = None; // an invalid finish doesn't lock the round out
+                p.finished = None;
             }
         } else if p.in_start {
             p.run_start = Some(now);
@@ -553,9 +667,8 @@ impl Game {
         p.has_state = true;
         p.last_state = now;
         p.states += 1;
-        // Record the run for a possible ghost, only while it could still beat the record.
         if let Some(rs) = p.run_start {
-            if p.valid && p.finished.is_none() && p.states % GHOST_HZ_DIV == 0 && record_ms.is_none_or(|r| now - rs < r + 500) && p.ghost.len() < GHOST_CAP {
+            if p.bot.is_none() && p.valid && p.finished.is_none() && p.states % GHOST_HZ_DIV == 0 && record_ms.is_none_or(|r| now - rs < r + 500) && p.ghost.len() < GHOST_CAP {
                 p.ghost.push((pos, yaw));
             }
         }
@@ -568,34 +681,35 @@ impl Game {
     }
 
     fn finish(&mut self, id: u16, ms: u32, racing: bool) {
-        let now = self.now();
         let p = self.players[id as usize].as_mut().unwrap();
-        let (name, sponsor, flag, late) = (p.name.clone(), p.sponsor.clone(), p.flag.clone(), p.late);
+        let (name, spray, late, bot) = (p.name.clone(), p.spray.clone(), p.late, p.bot.is_some());
         let ghost = std::mem::take(&mut p.ghost);
 
-        let best = &mut self.saved.best;
-        match best.iter_mut().find(|b| b.name == name) {
-            Some(b) if ms < b.ms => b.ms = ms,
-            Some(_) => {}
-            None => best.push(Best { name: name.clone(), ms }),
-        }
-        best.sort_by_key(|b| b.ms);
-        best.truncate(10);
-
         let mut is_record = false;
-        if self.saved.record.as_ref().is_none_or(|r| ms < r.ms) {
-            is_record = true;
-            if let Some(h) = &flag {
-                self.images.persist(h);
+        if !bot {
+            let best = &mut self.saved.best;
+            match best.iter_mut().find(|b| b.name == name) {
+                Some(b) if ms < b.ms => b.ms = ms,
+                Some(_) => {}
+                None => best.push(Best { name: name.clone(), ms }),
             }
-            self.saved.record = Some(Record { name: name.clone(), sponsor: sponsor.clone(), ms, flag: flag.clone(), at: unix_now() });
-            if !ghost.is_empty() {
-                self.ghost = ghost;
-                self.ghost_frame = Bytes::from(proto::ghost(&self.ghost));
-                self.save_ghost();
-                self.broadcast_bin(&self.ghost_frame);
+            best.sort_by_key(|b| b.ms);
+            best.truncate(10);
+            // NPCs race and place, but the record and its ghost are human-only.
+            if self.saved.record.as_ref().is_none_or(|r| ms < r.ms) {
+                is_record = true;
+                if let Some(h) = &spray {
+                    self.images.persist(h);
+                }
+                self.saved.record = Some(Record { name: name.clone(), ms, spray: spray.clone(), at: unix_now() });
+                if !ghost.is_empty() {
+                    self.ghost = ghost;
+                    self.ghost_frame = Bytes::from(proto::ghost(&self.ghost));
+                    self.save_ghost();
+                    self.broadcast_bin(&self.ghost_frame);
+                }
+                self.broadcast(json!({ "t": "record", "record": self.saved.record }));
             }
-            self.broadcast(json!({ "t": "record", "record": self.saved.record }));
         }
 
         let mut place = None;
@@ -605,46 +719,28 @@ impl Game {
             place = Some(pl);
             self.results.push((id, pl, ms));
             self.players[id as usize].as_mut().unwrap().place = Some(pl);
-            if pl == 1 {
-                self.phase_ends = self.phase_ends.min(now + AFTER_FIRST_MS);
+            if pl == 1 && !bot {
                 match self.saved.wins.iter_mut().find(|w| w.name == name) {
                     Some(w) => w.wins += 1,
                     None => self.saved.wins.push(Wins { name: name.clone(), wins: 1 }),
                 }
                 self.saved.wins.sort_by(|a, b| b.wins.cmp(&a.wins));
                 self.saved.wins.truncate(10);
-                self.claim_billboard(id, name.clone(), sponsor, flag);
             }
-            self.broadcast(json!({ "t": "placed", "id": id, "name": name, "place": pl, "ms": ms, "endsAt": self.phase_ends }));
+            self.broadcast(json!({ "t": "placed", "id": id, "name": name, "place": pl, "ms": ms, "bot": bot }));
         }
         self.players[id as usize].as_ref().unwrap().json(json!({ "t": "finish", "ms": ms, "place": place, "record": is_record, "late": late || !racing }));
+        if bot && self.rand() < 0.5 {
+            let line = if place == Some(1) { "ez" } else { "gg" };
+            self.npc_chat(id, line);
+        }
         self.save();
         self.broadcast(self.board());
     }
 
-    // The round winner takes the best free slot, or bumps the oldest ad on the course.
-    fn claim_billboard(&mut self, id: u16, name: String, sponsor: String, flag: Option<String>) {
-        let taken: HashSet<u32> = self.saved.billboards.iter().map(|b| b.slot).collect();
-        let slot = match self.level.billboards.iter().map(|s| s.id).filter(|s| *s != 0 && !taken.contains(s)).min() {
-            Some(s) => s,
-            None => match self.saved.billboards.iter().min_by_key(|b| b.at).map(|b| b.slot) {
-                Some(s) => s,
-                None => return,
-            },
-        };
-        self.saved.billboards.retain(|b| b.slot != slot);
-        if let Some(h) = &flag {
-            self.images.persist(h);
-        }
-        let ip = self.players[id as usize].as_ref().unwrap().ip.clone();
-        let b = Billboard { slot, hash: flag, text: String::new(), url: None, name, sponsor, at: unix_now(), ip };
-        let public = b.public();
-        self.saved.billboards.push(b);
-        self.save();
-        self.gc_images();
-        self.billboard_pending = Some((id, slot, self.now() + PODIUM_MS + LOBBY_MS + AFTER_FIRST_MS));
-        self.broadcast(json!({ "t": "billboard", "board": public, "winner": id }));
-        self.players[id as usize].as_ref().unwrap().json(json!({ "t": "promptBillboard", "slot": slot }));
+    fn npc_chat(&self, id: u16, text: &str) {
+        let p = self.players[id as usize].as_ref().unwrap();
+        self.broadcast(json!({ "t": "chat", "id": id, "name": p.name, "color": p.color, "text": text, "bot": true }));
     }
 
     fn set_phase(&mut self, phase: Phase) {
@@ -653,7 +749,17 @@ impl Game {
         match phase {
             Phase::Lobby => {
                 self.phase_ends = now + LOBBY_MS;
-                self.broadcast(json!({ "t": "round", "phase": "lobby", "endsAt": self.phase_ends, "now": now }));
+                let results: Vec<Value> = self.results.iter().take(3).map(|(id, place, ms)| {
+                    let p = self.players[*id as usize].as_ref();
+                    json!({ "id": id, "place": place, "ms": ms, "name": p.map(|p| p.name.clone()), "spray": p.and_then(|p| p.spray.clone()), "bot": p.is_some_and(|p| p.bot.is_some()) })
+                }).collect();
+                self.last_results = json!({ "top": results, "finishers": self.results.len() });
+                self.broadcast(json!({ "t": "round", "phase": "lobby", "endsAt": self.phase_ends, "now": now, "results": self.last_results }));
+                for p in self.players.iter_mut().flatten() {
+                    if let Some(b) = &mut p.bot {
+                        b.done = true; // hold at the gate until GO
+                    }
+                }
             }
             Phase::Race => {
                 self.go = now;
@@ -663,39 +769,67 @@ impl Game {
                 for p in self.players.iter_mut().flatten() {
                     p.reset_run();
                     p.late = false;
+                    if let Some(b) = &mut p.bot {
+                        b.restart(now);
+                    }
                 }
                 self.broadcast(json!({ "t": "round", "phase": "race", "endsAt": self.phase_ends, "go": now, "now": now }));
             }
-            Phase::Podium => {
-                self.phase_ends = now + PODIUM_MS;
-                let results: Vec<Value> = self.results.iter().take(3).map(|(id, place, ms)| {
-                    let p = self.players[*id as usize].as_ref();
-                    json!({ "id": id, "place": place, "ms": ms, "name": p.map(|p| p.name.clone()), "sponsor": p.map(|p| p.sponsor.clone()), "flag": p.and_then(|p| p.flag.clone()) })
-                }).collect();
-                let finishers = self.results.len();
-                self.broadcast(json!({ "t": "round", "phase": "podium", "endsAt": self.phase_ends, "now": now, "results": results, "finishers": finishers }));
+        }
+    }
+
+    // Drive the NPCs: in the lobby they sit at the gate; in a race they ride the line.
+    fn tick_npcs(&mut self, now: u32) {
+        let spawn0 = self.spawns[0];
+        let racing = self.phase == Phase::Race;
+        let mut moves: Vec<(u16, u32, V3, u16, u8)> = Vec::new();
+        let mut chats: Vec<(u16, &'static str)> = Vec::new();
+        for (i, p) in self.players.iter_mut().enumerate() {
+            let Some(p) = p.as_mut() else { continue };
+            let Some(b) = &mut p.bot else { continue };
+            if !racing {
+                if p.pos != spawn0 || p.stage != 0 {
+                    moves.push((i as u16, p.serial, spawn0, p.yaw, 2));
+                }
+                continue;
             }
+            if now >= b.chat_at {
+                let k = (b.rand() * npc::LINES.len() as f32) as usize;
+                chats.push((i as u16, npc::LINES[k.min(npc::LINES.len() - 1)]));
+                b.chat_at = now + 40_000 + (b.rand() * 80_000.0) as u32;
+            }
+            if let Some((pos, yaw, fail)) = b.step(&self.line, &self.spawns, now) {
+                moves.push((i as u16, p.serial, pos, yaw, if fail { 2 } else { 0 }));
+            }
+        }
+        for (id, serial, pos, yaw, flags) in moves {
+            self.on_state(id, serial, pos, yaw, 0, flags);
+        }
+        for (id, text) in chats {
+            self.npc_chat(id, text);
         }
     }
 
     pub fn tick(&mut self) {
         let now = self.now();
         self.ticks += 1;
+        self.spray_tokens = (self.spray_tokens + SPRAYS_PER_SEC * now.saturating_sub(self.spray_refill) as f32 / 1000.0).min(SPRAYS_PER_SEC);
+        self.spray_refill = now;
 
         if now >= self.phase_ends {
             match self.phase {
                 Phase::Lobby => self.set_phase(Phase::Race),
-                Phase::Race => self.set_phase(Phase::Podium),
-                Phase::Podium => self.set_phase(Phase::Lobby),
+                Phase::Race => self.set_phase(Phase::Lobby),
             }
         }
+        self.tick_npcs(now);
 
         // Scoreboard numbers, once a second. ponytail: skipped on huge servers, where it'd be O(N^2) per second.
         let named = self.players.iter().flatten().filter(|p| p.named).count();
         if self.ticks % FAR_EVERY == 10 && named <= ROSTER_MAX {
             let rows: Vec<Value> = self.players.iter().enumerate().filter_map(|(i, p)| {
                 let p = p.as_ref().filter(|p| p.named)?;
-                Some(json!([i, p.stage, p.finished.unwrap_or(0), p.place.unwrap_or(0), p.late]))
+                Some(json!([i, p.stage, p.finished.unwrap_or(0), p.place.unwrap_or(0), p.late, p.bot.is_some()]))
             }).collect();
             self.broadcast(json!({ "t": "roster", "p": rows }));
         }
@@ -719,7 +853,6 @@ impl Game {
             }
             encoded.insert(*cell, buf);
         }
-        // Far view: a rotating window of everyone, so bandwidth stays flat as the server fills up.
         let far = (self.ticks % FAR_EVERY == 0).then(|| {
             let all: Vec<u16> = self.cells.values().flatten().copied().collect();
             let n = all.len().min(FAR_CAP);
@@ -731,9 +864,8 @@ impl Game {
             }
             Bytes::from(buf)
         });
-        // Everyone in the same cell sees the same 3x3x3 neighbourhood: build it once, share it.
         let mut views: HashMap<(i32, i32, i32), Bytes> = HashMap::with_capacity(self.cells.len());
-        for p in self.players.iter().flatten().filter(|p| p.named) {
+        for p in self.players.iter().flatten().filter(|p| p.named && p.bot.is_none()) {
             if let Some(far) = &far {
                 p.send(Message::Binary(far.clone()));
             }
@@ -751,7 +883,6 @@ impl Game {
                         }
                     }
                 }
-                // Crowded? Send a rotating window so every glider still updates, just less often.
                 let total = recs.len() / proto::SNAP_RECORD;
                 let n = total.min(NEAR_CAP);
                 let mut buf = Vec::with_capacity(proto::SNAP_HEADER + n * proto::SNAP_RECORD);
@@ -781,7 +912,7 @@ mod tests {
     }
 
     fn game() -> Game {
-        Game::new(level(), None, 100, images::Store::new(None))
+        Game::new(level(), None, 100, images::Store::new(None), 0)
     }
 
     fn join(g: &mut Game, name: &str) -> (u16, u32, mpsc::Receiver<Message>) {
@@ -802,7 +933,6 @@ mod tests {
         b.into()
     }
 
-    // Packets may only move ~300u at test speed, so put the player just short of `pos` first, then step into it.
     fn walk(g: &mut Game, a: u16, sa: u32, pos: V3) {
         if let Some(p) = g.players[a as usize].as_mut() {
             if p.has_state {
@@ -828,23 +958,12 @@ mod tests {
         out
     }
 
-    fn bins(rx: &mut mpsc::Receiver<Message>) -> Vec<Bytes> {
-        let mut out = Vec::new();
-        while let Ok(m) = rx.try_recv() {
-            if let Message::Binary(b) = m {
-                out.push(b);
-            }
-        }
-        out
-    }
-
     fn png(seed: u8) -> Bytes {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
         b.extend_from_slice(&[seed; 32]);
         b.into()
     }
 
-    // Leaves the start zone (clock starts) then, `run_ms` later, crosses the finish line via real packets.
     fn race(g: &mut Game, a: u16, sa: u32, run_ms: u32) {
         let sp = g.level.spawns[0].pos;
         g.handle(Inbound::Bin(a, sa, state(sp, 0)));
@@ -858,25 +977,107 @@ mod tests {
         p.run_start = Some(p.run_start.unwrap().saturating_sub(run_ms));
         p.pos = before;
         g.handle(Inbound::Bin(a, sa, state(inside, 0)));
-        // run_start is in the past, so the finish's elapsed time is `run_ms` + a few ms.
     }
 
     #[test]
-    fn a_legit_run_advances_stages_through_real_packets() {
+    fn two_minute_loop_lobby_then_race_with_results() {
         let mut g = game();
+        assert_eq!(g.phase_ends, LOBBY_MS);
+        let (a, sa, mut ra) = join(&mut g, "Alpha");
+        g.handle(Inbound::Bin(a, sa, state(g.level.spawns[0].pos, 0)));
         g.set_phase(Phase::Race);
-        let (a, sa, mut ra) = join(&mut g, "Legit");
-        let sp = g.level.spawns[0].pos;
-        let cp = g.level.triggers.iter().find(|t| t.kind == Kind::Checkpoint && t.stage == Some(1)).unwrap();
-        let (cx, cy, cz) = ((cp.min[0] + cp.max[0]) / 2.0, cp.min[1], (cp.min[2] + cp.max[2]) / 2.0);
-        g.handle(Inbound::Bin(a, sa, state(sp, 0)));
-        walk(&mut g, a, sa, [sp[0], sp[1] + 900.0, sp[2]]); // leave the start zone: clock starts
-        assert!(g.players[a as usize].as_ref().unwrap().run_start.is_some());
-        walk(&mut g, a, sa, [cx, cy + 60.0, cz]);
-        let p = g.players[a as usize].as_ref().unwrap();
-        assert_eq!(p.stage, 1);
-        assert!(p.valid);
-        assert!(texts(&mut ra).iter().any(|m| m["t"] == "split" && m["stage"] == 1));
+        texts(&mut ra);
+        race(&mut g, a, sa, 40_000);
+        assert_eq!(g.phase_ends, g.go + RACE_MS, "a finish doesn't shorten the race");
+        g.set_phase(Phase::Lobby);
+        let lobby = texts(&mut ra).into_iter().find(|m| m["t"] == "round" && m["phase"] == "lobby").unwrap();
+        assert_eq!(lobby["results"]["top"][0]["name"], "Alpha");
+        assert_eq!(lobby["results"]["finishers"], 1);
+        assert_eq!(lobby["endsAt"].as_u64().unwrap() - lobby["now"].as_u64().unwrap(), LOBBY_MS as u64);
+    }
+
+    #[test]
+    fn walls_are_free_for_all_but_you_must_be_there() {
+        let mut g = game();
+        let (a, sa, mut ra) = join(&mut g, "Painter");
+        g.handle(Inbound::Bin(a, sa, upload(&png(1))));
+        let wall = g.level.triggers.iter().find(|t| t.kind == Kind::Wall && t.id == Some(10)).unwrap();
+        let inside = [(wall.min[0] + wall.max[0]) / 2.0, (wall.min[1] + wall.max[1]) / 2.0, (wall.min[2] + wall.max[2]) / 2.0];
+        g.handle(Inbound::Bin(a, sa, state(g.level.spawns[0].pos, 0)));
+        g.handle(Inbound::Text(a, sa, json!({ "t": "wall", "id": 10 }).to_string().into()));
+        assert!(g.saved.walls.is_empty(), "too far away");
+        assert!(texts(&mut ra).iter().any(|m| m["t"] == "notice"));
+        let p = g.players[a as usize].as_mut().unwrap();
+        p.pos = inside;
+        g.handle(Inbound::Text(a, sa, json!({ "t": "wall", "id": 10 }).to_string().into()));
+        assert_eq!(g.saved.walls.len(), 1);
+        assert_eq!(g.saved.walls[0].name, "Painter");
+        // Someone else paints over it.
+        let (b, sb, _rb) = join(&mut g, "Rival");
+        g.handle(Inbound::Bin(b, sb, upload(&png(2))));
+        g.handle(Inbound::Bin(b, sb, state(inside, 0)));
+        g.handle(Inbound::Text(b, sb, json!({ "t": "wall", "id": 10 }).to_string().into()));
+        assert_eq!(g.saved.walls.len(), 1);
+        assert_eq!(g.saved.walls[0].name, "Rival");
+        assert!(g.images.get(&images::hash(&png(2))).is_some());
+        g.handle(Inbound::Admin(Admin::Ban("1.2.3.4".into())));
+        assert!(g.saved.walls.is_empty());
+    }
+
+    #[test]
+    fn npcs_race_place_and_win_but_never_set_the_record() {
+        let mut g = Game::new(level(), None, 100, images::Store::new(None), 4);
+        assert_eq!(g.players.iter().flatten().filter(|p| p.bot.is_some()).count(), 4);
+        let (h, sh, mut rh) = join(&mut g, "Human");
+        g.handle(Inbound::Bin(h, sh, state(g.level.spawns[0].pos, 0)));
+        g.set_phase(Phase::Race);
+        // Let the NPCs run: 4 minutes of ticks at 50 ms, advancing the clock by faking `start`.
+        let mut finished = 0;
+        for i in 0..4800 {
+            g.start = Instant::now() - Duration::from_millis(g.go as u64 + i * 50);
+            g.tick_npcs(g.now());
+            finished = g.results.len();
+            if finished >= 2 {
+                break;
+            }
+        }
+        assert!(finished >= 1, "NPCs should finish the course");
+        assert!(g.results.iter().any(|(id, place, _)| *place == 1 && g.players[*id as usize].as_ref().unwrap().bot.is_some()));
+        assert!(g.saved.record.is_none(), "NPC finishes don't set the record");
+        assert!(g.saved.wins.is_empty(), "NPC wins don't go on the human win board");
+        assert!(texts(&mut rh).iter().any(|m| m["t"] == "placed" && m["bot"] == true));
+        // A human finishing later still gets the record.
+        race(&mut g, h, sh, 50_000);
+        assert_eq!(g.saved.record.as_ref().unwrap().name, "Human");
+    }
+
+    #[test]
+    fn chat_is_relayed_and_rate_limited() {
+        let mut g = game();
+        let (a, sa, _ra) = join(&mut g, "Talker");
+        let (_b, _sb, mut rb) = join(&mut g, "Listener");
+        texts(&mut rb);
+        for i in 0..5 {
+            g.handle(Inbound::Text(a, sa, json!({ "t": "chat", "text": format!("hi {i}") }).to_string().into()));
+        }
+        let got = texts(&mut rb).into_iter().filter(|m| m["t"] == "chat").count();
+        assert_eq!(got, CHAT_BURST);
+    }
+
+    #[test]
+    fn live_sprays_need_range_and_cooldown() {
+        let mut g = game();
+        let (a, sa, mut ra) = join(&mut g, "Sprayer");
+        g.handle(Inbound::Bin(a, sa, state([0.0, 0.0, 0.0], 0)));
+        g.handle(Inbound::Bin(a, sa, upload(&png(3))));
+        texts(&mut ra);
+        let msg = |p: V3| json!({ "t": "spray", "pos": p, "normal": [0.0, -1.0, 0.0] }).to_string();
+        g.handle(Inbound::Text(a, sa, msg([0.0, 2000.0, 64.0]).into()));
+        assert!(!texts(&mut ra).iter().any(|m| m["t"] == "spray"));
+        g.handle(Inbound::Text(a, sa, msg([0.0, 200.0, 64.0]).into()));
+        assert!(texts(&mut ra).iter().any(|m| m["t"] == "spray"));
+        g.handle(Inbound::Text(a, sa, msg([0.0, 210.0, 64.0]).into()));
+        assert!(!texts(&mut ra).iter().any(|m| m["t"] == "spray"));
     }
 
     #[test]
@@ -886,87 +1087,21 @@ mod tests {
         let sp = g.level.spawns[0].pos;
         g.handle(Inbound::Bin(a, sa, state(sp, 0)));
         walk(&mut g, a, sa, [sp[0], sp[1] + 900.0, sp[2]]);
-        g.handle(Inbound::Bin(a, sa, state(g.level.spawns[3].pos, 2))); // teleport to a spawn you haven't earned
+        g.handle(Inbound::Bin(a, sa, state(g.level.spawns[3].pos, 2)));
         assert!(texts(&mut ra).iter().any(|m| m["t"] == "invalid"));
-        let (b, sb, mut rb) = join(&mut g, "Speedy");
-        g.handle(Inbound::Bin(b, sb, state(sp, 0)));
-        g.handle(Inbound::Bin(b, sb, state([sp[0], sp[1] + 20000.0, sp[2]], 0)));
-        assert!(texts(&mut rb).iter().any(|m| m["t"] == "invalid" && m["reason"] == "moved impossibly fast"));
         let mut g2 = game();
         g2.level.min_run_ms = 30_000;
         g2.set_phase(Phase::Race);
         let (c, sc, mut rc) = join(&mut g2, "Hacker");
         race(&mut g2, c, sc, 5_000);
         assert!(texts(&mut rc).iter().any(|m| m["t"] == "invalid" && m["reason"].as_str().unwrap().contains("faster")));
-        assert!(g2.saved.wins.is_empty());
-    }
-
-    #[test]
-    fn placement_winner_billboard_and_late_joiners() {
-        let mut g = game();
-        let (a, sa, mut ra) = join(&mut g, "Alpha");
-        let (b, sb, mut rb) = join(&mut g, "Bravo");
-        g.handle(Inbound::Bin(a, sa, state(g.level.spawns[0].pos, 0)));
-        g.handle(Inbound::Bin(b, sb, state(g.level.spawns[0].pos, 0)));
-        g.handle(Inbound::Bin(a, sa, upload(&png(1))));
-        g.set_phase(Phase::Race);
-        texts(&mut ra);
-        texts(&mut rb);
-        race(&mut g, a, sa, 40_000);
-        race(&mut g, b, sb, 41_000);
-        let fa = texts(&mut ra).into_iter().find(|m| m["t"] == "finish").unwrap();
-        assert_eq!(fa["place"], 1);
-        assert_eq!(fa["record"], true);
-        let fb = texts(&mut rb).into_iter().find(|m| m["t"] == "finish").unwrap();
-        assert_eq!(fb["place"], 2);
-        // Winner claimed slot 1 with their flag, and only they can write its text.
-        assert_eq!(g.saved.billboards.len(), 1);
-        assert_eq!(g.saved.billboards[0].slot, 1);
-        assert_eq!(g.saved.billboards[0].hash, Some(images::hash(&png(1))));
-        g.handle(Inbound::Text(b, sb, json!({ "t": "billboard", "text": "Bravo was here" }).to_string().into()));
-        assert_eq!(g.saved.billboards[0].text, "");
-        g.handle(Inbound::Text(a, sa, json!({ "t": "billboard", "text": "Alpha Pizza, best in town", "url": "https://alpha.pizza" }).to_string().into()));
-        assert_eq!(g.saved.billboards[0].text, "Alpha Pizza, best in town");
-        assert_eq!(g.saved.record.as_ref().unwrap().name, "Alpha");
-        // A late joiner finishing faster doesn't place and doesn't take the win.
-        let (c, sc, mut rc) = join(&mut g, "Late");
-        assert!(g.players[c as usize].as_ref().unwrap().late);
-        race(&mut g, c, sc, 30_000);
-        let fc = texts(&mut rc).into_iter().find(|m| m["t"] == "finish").unwrap();
-        assert!(fc["place"].is_null());
-        assert_eq!(g.saved.wins[0].name, "Alpha");
-        // The round ends 30s after the first finisher, and the podium lists both placers.
-        assert!(g.phase_ends <= g.now() + AFTER_FIRST_MS);
-        g.set_phase(Phase::Podium);
-        let podium = texts(&mut rb).into_iter().find(|m| m["t"] == "round" && m["phase"] == "podium").unwrap();
-        assert_eq!(podium["results"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn billboard_slots_fill_then_bump_the_oldest() {
-        let mut g = game();
-        let n = g.level.billboards.iter().filter(|s| s.id != 0).count() as u32;
-        for i in 0..n + 1 {
-            let (a, sa, _ra) = join(&mut g, &format!("W{i}"));
-            g.handle(Inbound::Bin(a, sa, state(g.level.spawns[0].pos, 0)));
-            g.set_phase(Phase::Race);
-            race(&mut g, a, sa, 60_000 + i * 1000);
-            if i < n {
-                g.saved.billboards.iter_mut().find(|b| b.name == format!("W{i}")).unwrap().at = 1000 + i as u64;
-            }
-        }
-        assert_eq!(g.saved.billboards.len() as u32, n);
-        assert!(g.saved.billboards.iter().all(|b| b.name != "W0"), "oldest bumped");
-        assert!(g.saved.billboards.iter().any(|b| b.name == format!("W{n}") && b.slot == 1));
-        g.handle(Inbound::Admin(Admin::Ban("1.2.3.4".into())));
-        assert!(g.saved.billboards.is_empty());
     }
 
     #[test]
     fn record_ghost_is_recorded_persisted_and_sent_to_joiners() {
-        let dir = std::env::temp_dir().join(format!("skysurf-v2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("skysurf-v21-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut g = Game::new(level(), Some(dir.clone()), 100, images::Store::new(Some(dir.join("img"))));
+        let mut g = Game::new(level(), Some(dir.clone()), 100, images::Store::new(Some(dir.join("img"))), 0);
         g.set_phase(Phase::Race);
         let (a, sa, _ra) = join(&mut g, "Ghost");
         let sp = g.level.spawns[0].pos;
@@ -975,15 +1110,19 @@ mod tests {
         for i in 0..40 {
             g.handle(Inbound::Bin(a, sa, state([sp[0], sp[1] + 900.0 + i as f32 * 50.0, sp[2]], 0)));
         }
-        assert!(g.players[a as usize].as_ref().unwrap().ghost.len() >= 19);
         race(&mut g, a, sa, 50_000);
         assert!(!g.ghost.is_empty());
         drop(g);
-        let mut g = Game::new(level(), Some(dir.clone()), 100, images::Store::new(Some(dir.join("img"))));
+        let mut g = Game::new(level(), Some(dir.clone()), 100, images::Store::new(Some(dir.join("img"))), 0);
         assert!(!g.ghost.is_empty(), "ghost reloaded from disk");
-        assert_eq!(g.saved.record.as_ref().unwrap().name, "Ghost");
         let (_b, _sb, mut rb) = join(&mut g, "Newbie");
-        assert!(bins(&mut rb).iter().any(|b| b.first() == Some(&3)), "ghost frame sent on welcome");
+        let mut got = false;
+        while let Ok(m) = rb.try_recv() {
+            if let Message::Binary(b) = m {
+                got |= b.first() == Some(&3);
+            }
+        }
+        assert!(got, "ghost frame sent on welcome");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

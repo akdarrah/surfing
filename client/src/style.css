@@ -69,3 +69,21 @@ kbd { background: rgba(255, 255, 255, .08); color: var(--bone); border: 1px soli
 #podium .ad { border: 1px solid var(--magenta); padding: 12px 16px; margin-top: 10px; box-shadow: 0 0 20px rgba(255, 43, 214, .25); }
 #podium .ad b { color: var(--magenta); letter-spacing: .2em; font-size: 12px; display: block; margin-bottom: 4px; }
 #podium .ad a { color: var(--cyan); cursor: pointer; }
+
+/* v2.1: spray picker, chat, podium inside the HUD */
+label.wide { grid-column: 1 / -1; }
+#sprayPicker { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
+#sprayPicker img { width: 56px; height: 56px; background: #0b0d12; border: 2px solid rgba(255, 255, 255, .12); cursor: pointer; image-rendering: auto; }
+#sprayPicker img.on { border-color: var(--cyan); box-shadow: 0 0 10px rgba(53, 240, 255, .6); }
+#sprayPreview { width: 56px; height: 56px; object-fit: contain; background: #0b0d12; border: 2px solid var(--magenta); }
+.row small { color: #aab4c3; font-size: 12px; letter-spacing: 0; }
+#chat { position: absolute; left: 2.5vh; bottom: 12vh; width: min(60vw, 70vh); font-size: 2vh; pointer-events: none; }
+#chatLog div { margin: .3vh 0; text-shadow: 0 0 .8vh #000, 0 0 .2vh #000; transition: opacity .6s; }
+#chatLog b { font-weight: 700; } #chatLog .sys { color: var(--cyan); } #chatLog .faded { opacity: 0; }
+#chatLine[hidden] { display: none; }
+#chatLine { display: flex; gap: 1vh; align-items: center; pointer-events: auto; background: rgba(5, 6, 10, .75); padding: .6vh 1vh; border-left: .4vh solid var(--amber); }
+#chatLine span { color: var(--amber); font-weight: 700; }
+#chatLine input { flex: 1; background: transparent; border: 0; color: #fff; font-size: 2vh; outline: none; }
+#podium { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(640px, 92vw); background: rgba(5, 6, 10, .88); border: 1px solid rgba(53, 240, 255, .4); box-shadow: 0 0 8vh rgba(53, 240, 255, .18); padding: 24px 30px; backdrop-filter: blur(10px); text-shadow: none; }
+#podium .p img { width: 70px; height: 70px; object-fit: contain; background: #0b0d12; margin: 8px auto; display: block; }
+#podium .p .bot { font-size: 11px; color: #aab4c3; letter-spacing: .2em; }

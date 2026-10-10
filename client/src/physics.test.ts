@@ -115,21 +115,67 @@ test('every Meridian stage is completable from a standing start', () => {
   });
 });
 
-test('a full Meridian run finishes without a fail and slower than minRunMs', () => {
-  const json = meridian();
-  const l = loadLevel(json);
-  const s = player([...l.spawns[0].pos] as V3);
+function fullRun(json: LevelJSON, l: Level, jitter: V3, extra?: (s: PlayerState, stage: number, t: number) => void) {
+  const s = player([l.spawns[0].pos[0] + jitter[0], l.spawns[0].pos[1] + jitter[1], l.spawns[0].pos[2] + jitter[2]]);
   let stage = 0, ap = autopilot(json.line!, 0), t = 0;
-  for (; t < 30000 && stage < l.spawns.length; t++) {
+  const fails: string[] = [];
+  for (; t < 20000 && stage < l.spawns.length; t++) {
     playerMove(l, s, ap(s));
     for (const tr of l.triggers) {
       if (!touching(tr, s.pos, HULL)) continue;
       if (tr.type === 'boost') applyBoost(s, tr);
       else if (tr.type === 'checkpoint' && tr.stage === stage + 1) { stage++; ap = autopilot(json.line!, stage); }
       else if (tr.type === 'end' && tr.stage === stage + 1) stage++;
-      else if (tr.type === 'teleport' && tr.stage === stage) assert.fail(`fell on stage ${stage + 1} at ${s.pos.map(Math.round)} after ${t / 100}s`);
+      else if (tr.type === 'teleport' && tr.stage === stage) { fails.push(`stage ${stage + 1} at ${(t / 100).toFixed(1)}s`); const sp = l.spawns[stage]; s.pos = [...sp.pos] as V3; s.vel = [0, 0, 0]; ap = autopilot(json.line!, stage); }
     }
+    extra?.(s, stage, t);
   }
-  assert.equal(stage, l.spawns.length, `DNF at stage ${stage + 1}`);
-  assert.ok(t * 10 > json.minRunMs!, `run ${t * 10}ms beat the floor ${json.minRunMs}`);
+  return { s, stage, t, fails };
+}
+
+test('full Meridian runs from jittered starts finish with no fails (the course has margin)', () => {
+  const json = meridian();
+  const l = loadLevel(json);
+  for (const jitter of [[-16, -9, 0], [6, 9, 0], [17, -9, 0], [-5, 9, 0]] as V3[]) {
+    const r = fullRun(json, l, jitter);
+    assert.equal(r.stage, l.spawns.length, `DNF at stage ${r.stage + 1} (jitter ${jitter})`);
+    assert.deepEqual(r.fails, [], `fails with jitter ${jitter}`);
+    assert.ok(r.t * 10 > json.minRunMs!, `run ${r.t * 10}ms beat the floor ${json.minRunMs}`);
+  }
+});
+
+test("Crow's Nest is reachable with carried speed: keep straight where the course bends into the helix", () => {
+  const json = meridian() as LevelJSON & { routes: { name: string; wall: number; line: any[] }[] };
+  const l = loadLevel(json);
+  const route = json.routes.find(r => r.name === "Crow's Nest")!;
+  const stage = route.line[0][3];
+  const wall = l.triggers.find(t => t.type === 'wall' && t.id === route.wall)!;
+  // Ride the course into the helix stage, then branch when the route's first ramp is ahead.
+  const s = player([...l.spawns[0].pos] as V3);
+  let st = 0, ap = autopilot(json.line!, 0), onRoute = false, speedAtBranch = 0;
+  for (let t = 0; t < 8000; t++) {
+    if (st === stage && !onRoute && Math.hypot(route.line[0][0] - s.pos[0], route.line[0][1] - s.pos[1]) < 1200) { onRoute = true; speedAtBranch = Math.hypot(s.vel[0], s.vel[1]); ap = autopilot(route.line as any, stage, { lookahead: 300 }); }
+    playerMove(l, s, ap(s));
+    for (const tr of l.triggers) {
+      if (!touching(tr, s.pos, HULL)) continue;
+      if (tr.type === 'checkpoint' && tr.stage === st + 1 && !onRoute) { st++; ap = autopilot(json.line!, st); }
+      else if (tr.type === 'teleport' && tr.stage === st) assert.fail(`fell on the way at stage ${st + 1}${onRoute ? ` after branching at ${Math.round(speedAtBranch)} u/s` : ''}`);
+    }
+    if (touching(wall, s.pos, HULL)) return;
+  }
+  assert.fail(`never reached the Crow's Nest wall, ended at ${s.pos.map(Math.round)}`);
+});
+
+test('Finish Lookout is reachable: keep your speed through the finish line', () => {
+  const json = meridian();
+  const l = loadLevel(json);
+  const wall = l.triggers.find(t => t.type === 'wall' && (t as any).id === 14)!;
+  let reached = false;
+  fullRun(json, l, [0, 0, 0], (s, stage) => { if (stage === l.spawns.length && touching(wall, s.pos, HULL)) reached = true; });
+  // fullRun stops at the finish; carry on for 3 s from there, bunny-hopping the landing so the flat doesn't eat the speed.
+  const r = fullRun(json, l, [3, 0, 0]);
+  const s = r.s;
+  const yaw = Math.atan2(s.vel[1], s.vel[0]);
+  for (let t = 0; t < 300 && !reached; t++) { playerMove(l, s, { forward: 1, side: 0, jump: true, duck: false, yaw }); if (touching(wall, s.pos, HULL)) reached = true; }
+  assert.ok(reached, `never reached the lookout, ended at ${s.pos.map(Math.round)} speed ${Math.round(Math.hypot(s.vel[0], s.vel[1]))}`);
 });

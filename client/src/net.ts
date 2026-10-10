@@ -7,6 +7,7 @@
 import type { V3 } from './physics.ts';
 
 const TAU = Math.PI * 2;
+const QUANT = 2; // i16 positions are in 2-unit steps
 
 export function encodeState(pos: V3, yaw: number, pitch: number, flags: number) {
   const b = new DataView(new ArrayBuffer(18));
@@ -80,7 +81,7 @@ export class Net {
           const r = this.remote(b.getUint16(o, true));
           const snap: Snap = {
             t,
-            pos: [b.getInt16(o + 2, true), b.getInt16(o + 4, true), b.getInt16(o + 6, true)],
+            pos: [b.getInt16(o + 2, true) * QUANT, b.getInt16(o + 4, true) * QUANT, b.getInt16(o + 6, true) * QUANT],
             yaw: (b.getUint8(o + 8) / 256) * TAU,
             pitch: (b.getInt8(o + 9) / 127) * (Math.PI / 2),
             flags: b.getUint8(o + 10),
@@ -93,7 +94,7 @@ export class Net {
         const n = b.getUint16(o + 1, true);
         const frames: GhostFrame[] = [];
         o += 3;
-        for (let i = 0; i < n; i++, o += 7) frames.push({ pos: [b.getInt16(o, true), b.getInt16(o + 2, true), b.getInt16(o + 4, true)], yaw: (b.getUint8(o + 6) / 256) * TAU });
+        for (let i = 0; i < n; i++, o += 7) frames.push({ pos: [b.getInt16(o, true) * QUANT, b.getInt16(o + 2, true) * QUANT, b.getInt16(o + 4, true) * QUANT], yaw: (b.getUint8(o + 6) / 256) * TAU });
         this.h.onGhost(frames);
       } else return;
     }

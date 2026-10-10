@@ -18,6 +18,7 @@ pub enum Kind {
     End,
     Teleport,
     Boost,
+    Wall,
 }
 
 #[derive(Deserialize)]
@@ -27,11 +28,13 @@ pub struct Trigger {
     pub min: V3,
     pub max: V3,
     pub stage: Option<usize>,
+    pub id: Option<u32>,
 }
 
 #[derive(Deserialize)]
-pub struct BillboardSlot {
+pub struct WallSlot {
     pub id: u32,
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -43,13 +46,33 @@ pub struct Level {
     pub spawns: Vec<Spawn>,
     pub triggers: Vec<Trigger>,
     #[serde(default)]
-    pub billboards: Vec<BillboardSlot>,
+    pub walls: Vec<WallSlot>,
+    // The ideal racing line: [x, y, z, stage, ("air")]. NPCs ride it.
+    #[serde(default)]
+    pub line: Vec<Vec<serde_json::Value>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct LinePoint {
+    pub pos: V3,
+    pub stage: usize,
 }
 
 impl Level {
     pub fn load(path: &str) -> Level {
         let s = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading level {path}: {e}"));
         serde_json::from_str(&s).unwrap_or_else(|e| panic!("parsing level {path}: {e}"))
+    }
+
+    pub fn line(&self) -> Vec<LinePoint> {
+        self.line
+            .iter()
+            .filter_map(|p| Some(LinePoint { pos: [p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32, p.get(2)?.as_f64()? as f32 - 60.0], stage: p.get(3)?.as_u64()? as usize }))
+            .collect()
+    }
+
+    pub fn inside(t: &Trigger, p: V3) -> bool {
+        (0..3).all(|i| p[i] + HULL_MAX[i] > t.min[i] && p[i] + HULL_MIN[i] < t.max[i])
     }
 
     pub fn near_spawn(&self, p: V3) -> Option<usize> {
@@ -88,7 +111,7 @@ mod tests {
     use super::*;
 
     fn trig() -> Trigger {
-        Trigger { kind: Kind::Checkpoint, min: [0.0, 0.0, 0.0], max: [100.0, 100.0, 100.0], stage: Some(1) }
+        Trigger { kind: Kind::Checkpoint, min: [0.0, 0.0, 0.0], max: [100.0, 100.0, 100.0], stage: Some(1), id: None }
     }
 
     #[test]
@@ -102,7 +125,9 @@ mod tests {
         let l = Level::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../levels/meridian.json"));
         assert_eq!(l.spawns.len(), 6);
         assert!(l.triggers.iter().any(|t| t.kind == Kind::End));
-        assert_eq!(l.billboards.len(), 8);
+        assert!(l.walls.len() >= 8);
         assert!(l.min_run_ms > 10_000);
+        assert!(l.line().len() > 100);
+        assert_eq!(l.triggers.iter().filter(|t| t.kind == Kind::Wall).count(), l.walls.len());
     }
 }

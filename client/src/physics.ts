@@ -41,13 +41,14 @@ const norm = (a: V3): V3 => scale(a, 1 / (len(a) || 1));
 export type Plane = { n: V3; d: number; cap?: boolean };
 export type Brush = { planes: Plane[]; faces: V3[][]; min: V3; max: V3; color: string; chain: boolean };
 export type Trigger = {
-  type: 'start' | 'checkpoint' | 'end' | 'teleport' | 'boost';
+  type: 'start' | 'checkpoint' | 'end' | 'teleport' | 'boost' | 'wall';
   min: V3; max: V3;
   stage?: number;
   dir?: V3;    // boost
   speed?: number;
+  id?: number; // wall
 };
-export type LinePoint = [number, number, number, number, ...string[]]; // x, y, z, stage, ('air')
+export type LinePoint = [number, number, number, number, ...(string | number | null)[]]; // x, y, z, stage, ('air' | null), ridge offset (left +)
 export type LevelJSON = {
   name: string;
   minRunMs?: number;

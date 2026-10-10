@@ -33,11 +33,16 @@ pub fn snap_header(buf: &mut Vec<u8>, time: u32, n: u16) {
     buf.extend_from_slice(&n.to_le_bytes());
 }
 
-// ponytail: i16 positions at 1-unit resolution cap levels to +/-32767 units; quantize coarser if a level outgrows it.
+// Positions go over the wire as i16 at 2-unit resolution (levels up to +/-65534 units); the client multiplies back.
+pub const QUANT: f32 = 2.0;
+fn q(v: f32) -> i16 {
+    (v / QUANT).round().clamp(-32767.0, 32767.0) as i16
+}
+
 pub fn snap_record(buf: &mut Vec<u8>, id: u16, pos: V3, yaw: u16, pitch: i16, flags: u8) {
     buf.extend_from_slice(&id.to_le_bytes());
     for v in pos {
-        buf.extend_from_slice(&(v.round().clamp(-32767.0, 32767.0) as i16).to_le_bytes());
+        buf.extend_from_slice(&q(v).to_le_bytes());
     }
     buf.push((yaw >> 8) as u8);
     buf.push((pitch >> 8) as i8 as u8);
@@ -51,7 +56,7 @@ pub fn ghost(samples: &[(V3, u16)]) -> Vec<u8> {
     b.extend_from_slice(&(samples.len() as u16).to_le_bytes());
     for (p, yaw) in samples {
         for v in p {
-            b.extend_from_slice(&(v.round().clamp(-32767.0, 32767.0) as i16).to_le_bytes());
+            b.extend_from_slice(&q(*v).to_le_bytes());
         }
         b.push((yaw >> 8) as u8);
     }
@@ -68,7 +73,7 @@ pub fn parse_ghost(b: &[u8]) -> Option<Vec<(V3, u16)>> {
     }
     Some((0..n).map(|i| {
         let o = 3 + i * 7;
-        let c = |k: usize| i16::from_le_bytes([b[o + k], b[o + k + 1]]) as f32;
+        let c = |k: usize| i16::from_le_bytes([b[o + k], b[o + k + 1]]) as f32 * QUANT;
         ([c(0), c(2), c(4)], (b[o + 6] as u16) << 8)
     }).collect())
 }
@@ -98,15 +103,15 @@ mod tests {
     #[test]
     fn snapshot_record_is_11_bytes() {
         let mut b = Vec::new();
-        snap_record(&mut b, 3, [10.4, -20.6, 99999.0], 0xffff, -32767, 5);
+        snap_record(&mut b, 3, [10.4, -20.6, 999999.0], 0xffff, -32767, 5);
         assert_eq!(b.len(), SNAP_RECORD);
-        assert_eq!(i16::from_le_bytes([b[2], b[3]]), 10);
+        assert_eq!(i16::from_le_bytes([b[2], b[3]]), 5); // 10.4 / 2
         assert_eq!(i16::from_le_bytes([b[6], b[7]]), 32767);
     }
 
     #[test]
     fn ghost_round_trip() {
-        let g = vec![([1.0, 2.0, 3.0], 0x1200), ([-5.0, 6.0, 7.0], 0xff00)];
+        let g = vec![([2.0, 4.0, 6.0], 0x1200), ([-6.0, 8.0, 10.0], 0xff00)];
         assert_eq!(parse_ghost(&ghost(&g)).unwrap(), g);
         assert!(parse_ghost(&[3, 5, 0, 1]).is_none());
     }
