@@ -3,53 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sky Surf</title>
+  <title>Sky Surf — Meridian</title>
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
   <div id="game"></div>
+  <div id="vignette"></div>
   <div id="hud" hidden>
     <div id="crosshair"></div>
-    <div id="speed" class="box">0</div>
+    <div id="speed"><b>0</b><small>U/S</small></div>
     <div id="timer"></div>
     <div id="stage"></div>
-    <div id="hp" class="box"></div>
-    <div id="ammo" class="box"></div>
+    <div id="race"></div>
     <div id="round"></div>
     <div id="banner" hidden></div>
-    <div id="promo" hidden></div>
+    <div id="countdown" hidden></div>
     <div id="feed"></div>
     <div id="board" hidden></div>
+    <div id="hint"></div>
   </div>
   <div id="menu">
-    <div class="hazard"></div>
-    <h1>SKY SURF</h1>
-    <p class="sub">CS surf. Sky privateers. Winners tag the map forever.</p>
+    <div class="brand"><span class="logo">SKY SURF</span><span class="level">MERIDIAN</span></div>
+    <p class="sub">CS surf, reborn. Everyone launches together. First to the finish owns a billboard on the course.</p>
     <div class="grid">
-      <label>NAME <input id="name" maxlength="24" /></label>
-      <label>SPONSOR <input id="sponsor" maxlength="32" placeholder="who's backing you?" /></label>
-      <label class="pick">FLAG <img id="flagPreview" alt="" /><input id="flagFile" type="file" accept="image/*" /></label>
-      <label class="pick">SPRAY <img id="sprayPreview" alt="" /><input id="sprayFile" type="file" accept="image/*" /></label>
+      <label>CALLSIGN <input id="name" maxlength="24" /></label>
+      <label>SPONSOR <input id="sponsor" maxlength="32" placeholder="who's on your billboard?" /></label>
+      <label class="pick">FLAG / BILLBOARD IMAGE <span class="row"><img id="flagPreview" alt="" /><input id="flagFile" type="file" accept="image/*" /></span></label>
       <label>SENSITIVITY <input id="sens" type="number" step="0.1" min="0.1" max="20" /></label>
+      <label class="range">MUSIC <input id="volMusic" type="range" min="0" max="1" step="0.05" /></label>
+      <label class="range">EFFECTS <input id="volSfx" type="range" min="0" max="1" step="0.05" /></label>
+      <label class="check"><input id="quality" type="checkbox" /> HIGH QUALITY (WebGPU, AO, motion blur)</label>
       <label class="check"><input id="hideImages" type="checkbox" /> HIDE PLAYER IMAGES</label>
     </div>
-    <button id="play">DEPLOY</button>
+    <div class="actions">
+      <button id="play">LAUNCH</button>
+      <button id="playFs" class="alt">LAUNCH FULL SCREEN</button>
+    </div>
     <div class="keys">
-      <b>SURF</b> hold <kbd>A</kbd>/<kbd>D</kbd> into the ramp, steer with the mouse, never hold <kbd>W</kbd> on a ramp<br />
-      <kbd>SPACE</kbd> jump · <kbd>C</kbd> duck · <kbd>F</kbd> restart stage · <kbd>T</kbd> spray · <kbd>V</kbd> camera · <kbd>TAB</kbd> scores<br />
-      <kbd>CLICK</kbd> shoot · <kbd>R</kbd> reload · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> weapons, upgrades sit on the risky lines<br />
-      First to the watchtower takes the round, paints the sail, and tags the map until someone paints over them.
+      <b>SURF</b> hold <kbd>A</kbd>/<kbd>D</kbd> into the ramp and steer with the mouse, never <kbd>W</kbd> on a ramp. Look where you're going, strafe where you want to curve.<br />
+      <kbd>SPACE</kbd> jump · <kbd>C</kbd> duck · <kbd>F</kbd> restart stage · <kbd>G</kbd> race the ghost · <kbd>V</kbd> camera · <kbd>TAB</kbd> scores · <kbd>F11</kbd> full screen
     </div>
     <div id="players"></div>
   </div>
-  <form id="promoForm" hidden>
-    <div class="hazard"></div>
-    <h2>YOU TOOK THE ROUND</h2>
-    <p>Paint the big sail. Everyone sees it until the next winner.</p>
-    <input id="promoText" maxlength="80" placeholder="your message (80 chars)" required />
-    <input id="promoUrl" maxlength="200" placeholder="https://your.link (optional)" />
-    <button>PAINT IT</button>
-    <a id="share" target="_blank" rel="noopener">SHARE ON X →</a>
+  <div id="podium" hidden></div>
+  <form id="billboardForm" hidden>
+    <div class="brand"><span class="logo">YOU TOOK THE ROUND</span></div>
+    <p>Your billboard is up on the course. Put something on it. Everyone flies past it every round until someone takes the slot.</p>
+    <input id="bbText" maxlength="80" placeholder="your message (80 chars)" />
+    <input id="bbUrl" maxlength="200" placeholder="https://your.link (optional)" />
+    <div class="actions"><button>POST IT</button><a id="share" class="button alt" target="_blank" rel="noopener">SHARE ON X</a></div>
   </form>
   <script type="module" src="/src/main.ts"></script>
 </body>

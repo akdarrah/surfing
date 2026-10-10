@@ -38,25 +38,26 @@ export const cross = (a: V3, b: V3): V3 => [
 ];
 const norm = (a: V3): V3 => scale(a, 1 / (len(a) || 1));
 
-export type Plane = { n: V3; d: number };
-export type Brush = { planes: Plane[]; faces: V3[][]; min: V3; max: V3; color: string };
+export type Plane = { n: V3; d: number; cap?: boolean };
+export type Brush = { planes: Plane[]; faces: V3[][]; min: V3; max: V3; color: string; chain: boolean };
 export type Trigger = {
-  type: 'start' | 'checkpoint' | 'end' | 'teleport' | 'pickup';
+  type: 'start' | 'checkpoint' | 'end' | 'teleport' | 'boost';
   min: V3; max: V3;
   stage?: number;
-  weapon?: number;
+  dir?: V3;    // boost
+  speed?: number;
 };
 export type LevelJSON = {
   name: string;
   minRunMs?: number;
   spawns: { pos: V3; yaw: number }[]; // index = stage
-  brushes: { verts: V3[]; color: string }[];
+  brushes: { verts: V3[]; color: string; chain?: boolean }[];
   triggers: Trigger[];
 };
 export type Level = { name: string; spawns: LevelJSON['spawns']; brushes: Brush[]; triggers: Trigger[] };
 
 // Planes of a convex hull from its vertices. ponytail: O(n^4) over vertex triples, fine for ramp-sized brushes (<= ~12 verts).
-export function brushFromVerts(verts: V3[], color = '#fff'): Brush {
+export function brushFromVerts(verts: V3[], color = '#fff', chain = false): Brush {
   const planes: Plane[] = [];
   const faces: V3[][] = [];
   const n = verts.length;
@@ -84,7 +85,10 @@ export function brushFromVerts(verts: V3[], color = '#fff'): Brush {
     const d = s > 0 ? max[a] : -min[a];
     if (!planes.some(p => dot(p.n, nrm) > 0.9999)) planes.push({ n: nrm, d });
   }
-  return { planes, faces, min, max, color };
+  // Ramp chains: the vertical planes (segment caps and axial bevels) are seams between neighbouring segments, not
+  // walls. They still bound the solid, but a box can't "hit" them; see clipBoxToBrush.
+  if (chain) for (const p of planes) if (Math.abs(p.n[2]) < 0.05 || p.n[2] > 0.95) p.cap = true;
+  return { planes, faces, min, max, color, chain };
 }
 
 function orderFace(pts: V3[], n: V3): V3[] {
@@ -100,16 +104,16 @@ export function loadLevel(json: LevelJSON): Level {
   return {
     name: json.name,
     spawns: json.spawns,
-    brushes: json.brushes.map(b => brushFromVerts(b.verts, b.color)),
+    brushes: json.brushes.map(b => brushFromVerts(b.verts, b.color, b.chain)),
     triggers: json.triggers,
   };
 }
 
-export type Trace = { fraction: number; end: V3; normal: V3 | null; startsolid: boolean; allsolid: boolean };
+export type Trace = { fraction: number; end: V3; normal: V3 | null; startsolid: boolean; allsolid: boolean; depth: number };
 
 // Sweep an AABB (mins/maxs relative to origin) from start to end against every brush.
 export function trace(level: Level, start: V3, end: V3, mins: V3, maxs: V3): Trace {
-  const tr: Trace = { fraction: 1, end, normal: null, startsolid: false, allsolid: false };
+  const tr: Trace = { fraction: 1, end, normal: null, startsolid: false, allsolid: false, depth: 0 };
   const lo: V3 = [0, 0, 0], hi: V3 = [0, 0, 0];
   for (let a = 0; a < 3; a++) {
     lo[a] = Math.min(start[a], end[a]) + mins[a] - 1;
@@ -118,7 +122,10 @@ export function trace(level: Level, start: V3, end: V3, mins: V3, maxs: V3): Tra
   for (const b of level.brushes) {
     if (b.max[0] < lo[0] || b.min[0] > hi[0] || b.max[1] < lo[1] || b.min[1] > hi[1] || b.max[2] < lo[2] || b.min[2] > hi[2]) continue;
     clipBoxToBrush(tr, b, start, end, mins, maxs);
-    if (tr.allsolid) break;
+    if (tr.allsolid) {
+      if ((globalThis as any).__physDebug) console.log('  allsolid in brush', level.brushes.indexOf(b), 'dists', b.planes.map(p => { const ofs: V3 = [p.n[0] < 0 ? maxs[0] : mins[0], p.n[1] < 0 ? maxs[1] : mins[1], p.n[2] < 0 ? maxs[2] : mins[2]]; return (dot(start, p.n) - (p.d - dot(ofs, p.n))).toFixed(1) + (p.cap ? 'c' : ''); }).join(' '), 'start', start.map(Math.round).join(','));
+      break;
+    }
   }
   tr.end = tr.fraction === 1 ? end : add(start, scale(sub(end, start), tr.fraction));
   return tr;
@@ -127,6 +134,8 @@ export function trace(level: Level, start: V3, end: V3, mins: V3, maxs: V3): Tra
 function clipBoxToBrush(tr: Trace, b: Brush, start: V3, end: V3, mins: V3, maxs: V3) {
   let enter = -1, leave = 1, getout = false, startout = false;
   let clip: Plane | null = null;
+  // Closest real face when the box starts inside a ramp segment (it slid in through a seam).
+  let seam: Plane | null = null, seamDepth = Infinity;
   for (const p of b.planes) {
     const ofs: V3 = [p.n[0] < 0 ? maxs[0] : mins[0], p.n[1] < 0 ? maxs[1] : mins[1], p.n[2] < 0 ? maxs[2] : mins[2]];
     const dist = p.d - dot(ofs, p.n);
@@ -135,16 +144,23 @@ function clipBoxToBrush(tr: Trace, b: Brush, start: V3, end: V3, mins: V3, maxs:
     if (d2 > 0) getout = true;
     if (d1 > 0) startout = true;
     if (d1 > 0 && (d2 >= DIST_EPSILON || d2 >= d1)) return;
+    if (!p.cap && -d1 < seamDepth) { seamDepth = -d1; seam = p; }
     if (d1 <= 0 && d2 <= 0) continue;
     if (d1 > d2) {
       const f = Math.max(0, (d1 - DIST_EPSILON) / (d1 - d2));
-      if (f > enter) { enter = f; clip = p; }
+      if (f > enter && !p.cap) { enter = f; clip = p; }
     } else {
       const f = Math.min(1, (d1 + DIST_EPSILON) / (d1 - d2));
       if (f < leave) leave = f;
     }
   }
   if (!startout) {
+    if (b.chain && seam) {
+      // Inside a ramp segment (slid in through a seam, or flew into its end): report its nearest face at fraction 0
+      // so the move clips along that face and pushes the box back out onto it.
+      if (tr.fraction > 0 || seamDepth > tr.depth) { tr.fraction = 0; tr.normal = seam.n; tr.depth = seamDepth; }
+      return;
+    }
     tr.startsolid = true;
     if (!getout) { tr.allsolid = true; tr.fraction = 0; }
     return;
@@ -156,7 +172,7 @@ function clipBoxToBrush(tr: Trace, b: Brush, start: V3, end: V3, mins: V3, maxs:
 }
 
 export type Input = { forward: number; side: number; jump: boolean; duck: boolean; yaw: number }; // forward/side in [-1,1], yaw radians
-export type PlayerState = { pos: V3; vel: V3; onGround: boolean; ducked: boolean };
+export type PlayerState = { pos: V3; vel: V3; onGround: boolean; ducked: boolean; contact?: V3 | null }; // contact = last surface normal touched this tick
 
 export const hullMax = (s: PlayerState) => (s.ducked ? DUCK_MAX : HULL_MAX);
 
@@ -194,6 +210,7 @@ function friction(s: PlayerState) {
 function tryPlayerMove(level: Level, s: PlayerState) {
   const maxs = hullMax(s);
   const planes: V3[] = [];
+  s.contact = null;
   const primal = s.vel;
   let original = s.vel;
   let timeLeft = TICK;
@@ -203,12 +220,15 @@ function tryPlayerMove(level: Level, s: PlayerState) {
     const tr = trace(level, s.pos, end, HULL_MIN, maxs);
     if (tr.allsolid) { s.vel = [0, 0, 0]; return; }
     if (tr.fraction > 0) { s.pos = tr.end; original = s.vel; planes.length = 0; }
+    if (tr.depth > 0) s.pos = add(s.pos, scale(tr.normal!, tr.depth + DIST_EPSILON)); // out of the seam
     if (tr.fraction === 1) break;
     timeLeft -= timeLeft * tr.fraction;
     if (planes.length >= MAX_CLIP_PLANES) { s.vel = [0, 0, 0]; break; }
     // Hitting the same plane twice would give a zero crease direction; nudge off it instead (Quake 2 PM_StepSlideMove).
     if (planes.some(p => dot(p, tr.normal!) > 0.99)) { s.vel = add(s.vel, tr.normal!); continue; }
     planes.push(tr.normal!);
+    s.contact = tr.normal!;
+    if ((globalThis as any).__physDebug) console.log('  bump', bump, 'frac', tr.fraction.toFixed(3), 'n', tr.normal!.map(x => x.toFixed(2)).join(','), 'planes', planes.length, 'vel', s.vel.map(Math.round).join(','));
     if (planes.length === 1 && !s.onGround) {
       s.vel = original = clipVelocity(original, planes[0], 1);
     } else {
@@ -220,12 +240,13 @@ function tryPlayerMove(level: Level, s: PlayerState) {
         if (ok) break;
       }
       if (i === planes.length) {
+        if ((globalThis as any).__physDebug) console.log('  crease', planes.map(p => p.map(x => x.toFixed(2)).join(',')).join(' | '));
         if (planes.length !== 2) { s.vel = [0, 0, 0]; break; }
         const dir = cross(planes[0], planes[1]);
         s.vel = scale(dir, dot(dir, s.vel));
       }
     }
-    if (dot(s.vel, primal) <= 0) { s.vel = [0, 0, 0]; break; }
+    if (dot(s.vel, primal) <= 0) { if ((globalThis as any).__physDebug) console.log('  reversed -> stop'); s.vel = [0, 0, 0]; break; }
   }
 }
 
@@ -264,6 +285,13 @@ export function playerMove(level: Level, s: PlayerState, inp: Input) {
   for (let a = 0; a < 3; a++) s.vel[a] = Math.max(-CVARS.maxvelocity, Math.min(CVARS.maxvelocity, s.vel[a]));
   categorize(level, s);
   if (s.onGround) s.vel[2] = 0;
+}
+
+// A booster pad: bring the velocity component along its direction up to `speed`. Re-applying while inside is a no-op.
+export function applyBoost(s: PlayerState, t: Trigger) {
+  const d = norm(t.dir ?? [0, 1, 0]);
+  const along = dot(s.vel, d);
+  if (along < (t.speed ?? 0)) s.vel = add(s.vel, scale(d, (t.speed ?? 0) - along));
 }
 
 export function touching(t: Trigger, pos: V3, maxs: V3) {

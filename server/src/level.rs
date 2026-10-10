@@ -1,4 +1,4 @@
-// The server only needs a level's spawns and triggers; brushes are client-side physics.
+// The server only needs a level's spawns, triggers and billboard slots; brushes are client-side physics.
 use serde::Deserialize;
 
 pub type V3 = [f32; 3];
@@ -17,7 +17,7 @@ pub enum Kind {
     Checkpoint,
     End,
     Teleport,
-    Pickup,
+    Boost,
 }
 
 #[derive(Deserialize)]
@@ -27,7 +27,11 @@ pub struct Trigger {
     pub min: V3,
     pub max: V3,
     pub stage: Option<usize>,
-    pub weapon: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct BillboardSlot {
+    pub id: u32,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +42,8 @@ pub struct Level {
     pub min_run_ms: u32,
     pub spawns: Vec<Spawn>,
     pub triggers: Vec<Trigger>,
+    #[serde(default)]
+    pub billboards: Vec<BillboardSlot>,
 }
 
 impl Level {
@@ -77,35 +83,12 @@ pub fn swept_touch(t: &Trigger, a: V3, b: V3) -> bool {
     true
 }
 
-// Ray vs axis-aligned box; returns the hit distance along the (unit) direction.
-pub fn ray_box(o: V3, d: V3, min: V3, max: V3) -> Option<f32> {
-    let (mut t0, mut t1) = (0.0f32, f32::MAX);
-    for i in 0..3 {
-        if d[i].abs() < 1e-8 {
-            if o[i] < min[i] || o[i] > max[i] {
-                return None;
-            }
-        } else {
-            let (mut e, mut x) = ((min[i] - o[i]) / d[i], (max[i] - o[i]) / d[i]);
-            if e > x {
-                std::mem::swap(&mut e, &mut x);
-            }
-            t0 = t0.max(e);
-            t1 = t1.min(x);
-            if t0 > t1 {
-                return None;
-            }
-        }
-    }
-    Some(t0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn trig() -> Trigger {
-        Trigger { kind: Kind::Checkpoint, min: [0.0, 0.0, 0.0], max: [100.0, 100.0, 100.0], stage: Some(1), weapon: None }
+        Trigger { kind: Kind::Checkpoint, min: [0.0, 0.0, 0.0], max: [100.0, 100.0, 100.0], stage: Some(1) }
     }
 
     #[test]
@@ -115,15 +98,11 @@ mod tests {
     }
 
     #[test]
-    fn ray_hits_box() {
-        assert_eq!(ray_box([-10.0, 50.0, 50.0], [1.0, 0.0, 0.0], [0.0; 3], [100.0; 3]), Some(10.0));
-        assert_eq!(ray_box([-10.0, 500.0, 50.0], [1.0, 0.0, 0.0], [0.0; 3], [100.0; 3]), None);
-    }
-
-    #[test]
     fn real_level_loads() {
-        let l = Level::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../levels/cloud-harbor.json"));
+        let l = Level::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../levels/meridian.json"));
         assert_eq!(l.spawns.len(), 6);
         assert!(l.triggers.iter().any(|t| t.kind == Kind::End));
+        assert_eq!(l.billboards.len(), 8);
+        assert!(l.min_run_ms > 10_000);
     }
 }

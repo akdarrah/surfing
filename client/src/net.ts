@@ -1,17 +1,16 @@
 // Wire protocol. Hot paths are binary (little-endian); rare events are JSON text frames.
-// C->S  STATE 1: f32 x,y,z | u16 yaw | i16 pitch | u8 flags(ducked=1, teleported=2, weapon<<2)        18 bytes
-// C->S  SHOT  2: f32 origin xyz | f32 dir xyz | u32 viewTime(server ms) | u8 weapon                     30 bytes
+// C->S  STATE 1: f32 x,y,z | u16 yaw | i16 pitch | u8 flags(ducked=1, teleported=2)                18 bytes
+// C->S  FLAG  3: raw JPEG/PNG bytes (<= 48 KB), already resized client-side
 // S->C  frame = blocks back to back:
-//   SNAP 1: u32 time | u16 n | n * (u16 id | i16 x,y,z | u8 yaw | i8 pitch | u8 flags(ducked=1, dead=2, weapon<<2))
-//   FX   2: u16 shooter | u8 weapon | f32 origin xyz | f32 dir xyz   (28 bytes)
+//   SNAP  1: u32 time | u16 n | n * (u16 id | i16 x,y,z | u8 yaw | i8 pitch | u8 flags(ducked=1, finished=2))
+//   GHOST 3: u16 n | n * (i16 x,y,z | u8 yaw)   the record run at 10 Hz
 import type { V3 } from './physics.ts';
 
-export const MSG_STATE = 1, MSG_SHOT = 2;
 const TAU = Math.PI * 2;
 
 export function encodeState(pos: V3, yaw: number, pitch: number, flags: number) {
   const b = new DataView(new ArrayBuffer(18));
-  b.setUint8(0, MSG_STATE);
+  b.setUint8(0, 1);
   pos.forEach((v, i) => b.setFloat32(1 + i * 4, v, true));
   b.setUint16(13, Math.round((((yaw % TAU) + TAU) % TAU) / TAU * 65535), true);
   b.setInt16(15, Math.round((pitch / (Math.PI / 2)) * 32767), true);
@@ -19,31 +18,20 @@ export function encodeState(pos: V3, yaw: number, pitch: number, flags: number) 
   return b.buffer;
 }
 
-// C->S  FLAG 3 / SPRAY 4: raw JPEG/PNG bytes (<= 48 KB), already resized client-side.
-export function encodeImage(kind: 3 | 4, img: Uint8Array) {
+export function encodeImage(img: Uint8Array) {
   const b = new Uint8Array(img.length + 1);
-  b[0] = kind;
+  b[0] = 3;
   b.set(img, 1);
   return b.buffer;
 }
 
-export function encodeShot(origin: V3, dir: V3, viewTime: number, weapon: number) {
-  const b = new DataView(new ArrayBuffer(30));
-  b.setUint8(0, MSG_SHOT);
-  [...origin, ...dir].forEach((v, i) => b.setFloat32(1 + i * 4, v, true));
-  b.setUint32(25, viewTime >>> 0, true);
-  b.setUint8(29, weapon);
-  return b.buffer;
-}
-
-export type Remote = {
-  id: number; name: string; color: string;
-  snaps: { t: number; pos: V3; yaw: number; pitch: number; flags: number }[];
-};
+export type Snap = { t: number; pos: V3; yaw: number; pitch: number; flags: number };
+export type Remote = { id: number; snaps: Snap[] };
+export type GhostFrame = { pos: V3; yaw: number };
 
 export type Handlers = {
   onJson: (m: any) => void;
-  onFx: (shooter: number, weapon: number, origin: V3, dir: V3) => void;
+  onGhost: (frames: GhostFrame[]) => void;
 };
 
 export class Net {
@@ -60,7 +48,7 @@ export class Net {
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { this.connected = true; ws.send(JSON.stringify({ t: 'hello', ...hello() })); };
     ws.onclose = () => { this.connected = false; this.remotes.clear(); setTimeout(() => this.connect(hello), 3000); };
-    ws.onmessage = e => (typeof e.data === 'string' ? this.json(JSON.parse(e.data)) : this.binary(new DataView(e.data)));
+    ws.onmessage = e => (typeof e.data === 'string' ? this.h.onJson(JSON.parse(e.data)) : this.binary(new DataView(e.data)));
   }
 
   send(data: ArrayBuffer | object) {
@@ -68,24 +56,16 @@ export class Net {
     this.ws.send(data instanceof ArrayBuffer ? data : JSON.stringify(data));
   }
 
-  // Server clock as seen by this client; remote boats render 100ms behind it so we always interpolate.
+  // Server clock as seen by this client; remote gliders render 100ms behind it so we always interpolate.
   serverNow() { return performance.now() + this.offset; }
   renderTime() { return this.serverNow() - 100; }
 
-  private json(m: any) {
-    if (m.t === 'welcome' || m.t === 'join') for (const p of m.players ?? [m]) this.remote(p.id, p.name, p.color);
-    if (m.t === 'leave') this.remotes.delete(m.id);
-    this.h.onJson(m);
-  }
-
-  private remote(id: number, name = '?', color = '#fff') {
+  private remote(id: number) {
     let r = this.remotes.get(id);
-    if (!r) this.remotes.set(id, (r = { id, name, color, snaps: [] }));
-    else if (name !== '?') { r.name = name; r.color = color; }
+    if (!r) this.remotes.set(id, (r = { id, snaps: [] }));
     return r;
   }
 
-  // A frame is a run of blocks: snapshots (one per nearby cell, or the far view) and shot tracers.
   private binary(b: DataView) {
     for (let o = 0; o < b.byteLength; ) {
       const type = b.getUint8(o);
@@ -98,9 +78,9 @@ export class Net {
         o += 7;
         for (let i = 0; i < n; i++, o += 11) {
           const r = this.remote(b.getUint16(o, true));
-          const snap = {
+          const snap: Snap = {
             t,
-            pos: [b.getInt16(o + 2, true), b.getInt16(o + 4, true), b.getInt16(o + 6, true)] as V3,
+            pos: [b.getInt16(o + 2, true), b.getInt16(o + 4, true), b.getInt16(o + 6, true)],
             yaw: (b.getUint8(o + 8) / 256) * TAU,
             pitch: (b.getInt8(o + 9) / 127) * (Math.PI / 2),
             flags: b.getUint8(o + 10),
@@ -109,19 +89,21 @@ export class Net {
           if (!last || t > last.t) r.snaps.push(snap);
           if (r.snaps.length > 30) r.snaps.shift();
         }
-      } else if (type === 2) {
-        const f = (i: number) => b.getFloat32(o + i, true);
-        this.h.onFx(b.getUint16(o + 1, true), b.getUint8(o + 3), [f(4), f(8), f(12)], [f(16), f(20), f(24)]);
-        o += 28;
+      } else if (type === 3) {
+        const n = b.getUint16(o + 1, true);
+        const frames: GhostFrame[] = [];
+        o += 3;
+        for (let i = 0; i < n; i++, o += 7) frames.push({ pos: [b.getInt16(o, true), b.getInt16(o + 2, true), b.getInt16(o + 4, true)], yaw: (b.getUint8(o + 6) / 256) * TAU });
+        this.h.onGhost(frames);
       } else return;
     }
   }
 }
 
 // Interpolated pose of a remote at server time t; null if we have nothing recent.
-export function samplePose(r: Remote, t: number) {
+export function samplePose(r: Remote, t: number): Snap | null {
   const s = r.snaps;
-  // Far boats only refresh every few seconds on a busy server, so keep showing them a while.
+  // Far gliders only refresh every few seconds on a busy server, so keep showing them a while.
   if (!s.length || t - s[s.length - 1].t > 12000) return null;
   let i = s.length - 1;
   while (i > 0 && s[i - 1].t > t) i--;

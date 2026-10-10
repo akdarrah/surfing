@@ -5,8 +5,7 @@ mod level;
 mod proto;
 
 use axum::{
-    Router,
-    Json,
+    Json, Router,
     extract::{ConnectInfo, Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -32,7 +31,7 @@ fn env(k: &str, default: &str) -> String {
 
 #[tokio::main]
 async fn main() {
-    let level = level::Level::load(&env("LEVEL", "levels/cloud-harbor.json"));
+    let level = level::Level::load(&env("LEVEL", "levels/meridian.json"));
     let data_dir: std::path::PathBuf = env("DATA_DIR", "data").into();
     let max_per_ip = env("MAX_CONN_PER_IP", "8").parse().unwrap_or(8);
     let images = images::Store::new(Some(data_dir.join("img")));
@@ -44,11 +43,10 @@ async fn main() {
     let router = Router::new()
         .route("/ws", get(ws))
         .route("/up", get(|| async { "ok" }))
-        .route("/admin/clear-promo", post(clear_promo))
         .route("/admin/ban", post(ban))
         .route("/admin/clear-images", post(clear_images))
-        .route("/admin/tags", get(list_tags))
-        .route("/admin/tags/{id}/remove", post(remove_tag))
+        .route("/admin/billboards", get(list_billboards))
+        .route("/admin/billboards/{slot}/remove", post(remove_billboard))
         .route("/img/{hash}", get(image))
         .fallback_service(ServeDir::new(env("STATIC_DIR", "client/dist")))
         .layer(SetResponseHeaderLayer::overriding(
@@ -96,7 +94,7 @@ async fn conn(socket: WebSocket, ip: String, app: App) {
         let _ = sink.close().await;
     };
     let reader = async {
-        // Token bucket: ~60 msgs/s sustained (20 Hz state + shots + chat-ish JSON), bursts to 120.
+        // Token bucket: ~60 msgs/s sustained (20 Hz state + JSON), bursts to 120.
         let (mut tokens, mut last) = (120.0f32, Instant::now());
         while let Some(Ok(m)) = stream.next().await {
             let now = Instant::now();
@@ -126,24 +124,7 @@ async fn conn(socket: WebSocket, ip: String, app: App) {
 
 fn authorized(app: &App, headers: &HeaderMap) -> bool {
     let given = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
-    matches!((&app.admin_token, given), (Some(t), Some(g)) if t.as_bytes().len() == g.len() && t.bytes().zip(g.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0)
-}
-
-async fn clear_promo(State(app): State<App>, headers: HeaderMap) -> StatusCode {
-    if !authorized(&app, &headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
-    let _ = app.tx.send(Inbound::Admin(Admin::ClearPromo)).await;
-    StatusCode::NO_CONTENT
-}
-
-async fn ban(State(app): State<App>, headers: HeaderMap, axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>) -> StatusCode {
-    if !authorized(&app, &headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
-    let Some(ip) = q.get("ip").filter(|ip| !ip.is_empty()) else { return StatusCode::BAD_REQUEST };
-    let _ = app.tx.send(Inbound::Admin(Admin::Ban(ip.clone()))).await;
-    StatusCode::NO_CONTENT
+    matches!((&app.admin_token, given), (Some(t), Some(g)) if t.len() == g.len() && t.bytes().zip(g.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0)
 }
 
 async fn image(State(app): State<App>, Path(hash): Path<String>) -> Response {
@@ -161,6 +142,15 @@ async fn image(State(app): State<App>, Path(hash): Path<String>) -> Response {
     }
 }
 
+async fn ban(State(app): State<App>, headers: HeaderMap, axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>) -> StatusCode {
+    if !authorized(&app, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let Some(ip) = q.get("ip").filter(|ip| !ip.is_empty()) else { return StatusCode::BAD_REQUEST };
+    let _ = app.tx.send(Inbound::Admin(Admin::Ban(ip.clone()))).await;
+    StatusCode::NO_CONTENT
+}
+
 async fn clear_images(State(app): State<App>, headers: HeaderMap) -> StatusCode {
     if !authorized(&app, &headers) {
         return StatusCode::UNAUTHORIZED;
@@ -169,19 +159,19 @@ async fn clear_images(State(app): State<App>, headers: HeaderMap) -> StatusCode 
     StatusCode::NO_CONTENT
 }
 
-async fn list_tags(State(app): State<App>, headers: HeaderMap) -> Response {
+async fn list_billboards(State(app): State<App>, headers: HeaderMap) -> Response {
     if !authorized(&app, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let (tx, rx) = oneshot::channel();
-    let _ = app.tx.send(Inbound::Admin(Admin::ListTags(tx))).await;
+    let _ = app.tx.send(Inbound::Admin(Admin::ListBillboards(tx))).await;
     rx.await.map(Json).map_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response(), IntoResponse::into_response)
 }
 
-async fn remove_tag(State(app): State<App>, headers: HeaderMap, Path(id): Path<u32>) -> StatusCode {
+async fn remove_billboard(State(app): State<App>, headers: HeaderMap, Path(slot): Path<u32>) -> StatusCode {
     if !authorized(&app, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    let _ = app.tx.send(Inbound::Admin(Admin::RemoveTag(id))).await;
+    let _ = app.tx.send(Inbound::Admin(Admin::RemoveBillboard(slot))).await;
     StatusCode::NO_CONTENT
 }
