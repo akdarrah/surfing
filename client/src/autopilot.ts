@@ -9,10 +9,11 @@ const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 export function autopilot(line: LinePoint[], stage: number, opts: { lookahead?: number } = {}) {
   const lookahead = opts.lookahead ?? 420;
   const pts = line.filter(p => p[3] === stage);
-  let idx = 0;
+  let idx = -1; // resolved to the nearest line point on the first call, so joining a line mid-way (back from a side route) doesn't aim at its start
   let yaw = Math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]);
   let target: V3 = [pts[0][0], pts[0][1], pts[0][2]];
   const fn = (s: PlayerState): Input => {
+    if (idx < 0) { let best = Infinity; idx = 0; for (let i = 0; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - s.pos[0], pts[i][1] - s.pos[1]); if (d < best) { best = d; idx = i; } } }
     const speed = Math.hypot(s.vel[0], s.vel[1]);
     const ahead = Math.min(900, Math.max(lookahead, speed * 0.3));
     const dist = (i: number) => Math.hypot(pts[i][0] - s.pos[0], pts[i][1] - s.pos[1]);

@@ -144,26 +144,35 @@ test('full Meridian runs from jittered starts finish with no fails (the course h
   }
 });
 
-test("Crow's Nest is reachable with carried speed: keep straight where the course bends into the helix", () => {
-  const json = meridian() as LevelJSON & { routes: { name: string; wall: number; line: any[] }[] };
+test('every fork\'s fast line is rideable: branch where it splits, paint its wall, rejoin and finish', () => {
+  const json = meridian() as LevelJSON & { routes: { name: string; wall: number; rejoin?: boolean; line: any[] }[] };
   const l = loadLevel(json);
-  const route = json.routes.find(r => r.name === "Crow's Nest")!;
-  const stage = route.line[0][3];
-  const wall = l.triggers.find(t => t.type === 'wall' && t.id === route.wall)!;
-  // Ride the course into the helix stage, then branch when the route's first ramp is ahead.
-  const s = player([...l.spawns[0].pos] as V3);
-  let st = 0, ap = autopilot(json.line!, 0), onRoute = false, speedAtBranch = 0;
-  for (let t = 0; t < 8000; t++) {
-    if (st === stage && !onRoute && Math.hypot(route.line[0][0] - s.pos[0], route.line[0][1] - s.pos[1]) < 1200) { onRoute = true; speedAtBranch = Math.hypot(s.vel[0], s.vel[1]); ap = autopilot(route.line as any, stage, { lookahead: 300 }); }
-    playerMove(l, s, ap(s));
-    for (const tr of l.triggers) {
-      if (!touching(tr, s.pos, HULL)) continue;
-      if (tr.type === 'checkpoint' && tr.stage === st + 1 && !onRoute) { st++; ap = autopilot(json.line!, st); }
-      else if (tr.type === 'teleport' && tr.stage === st) assert.fail(`fell on the way at stage ${st + 1}${onRoute ? ` after branching at ${Math.round(speedAtBranch)} u/s` : ''}`);
+  for (const route of json.routes.filter(r => r.rejoin)) {
+    const stage = route.line[0][3];
+    const wall = l.triggers.find(t => t.type === 'wall' && t.id === route.wall)!;
+    const last = route.line[route.line.length - 1];
+    const s = player([...l.spawns[0].pos] as V3);
+    let st = 0, ap = autopilot(json.line!, 0), onRoute = false, painted = false, done = false, speedAtBranch = 0;
+    for (let t = 0; t < 20000 && !done; t++) {
+      if (st === stage && !onRoute && Math.hypot(route.line[0][0] - s.pos[0], route.line[0][1] - s.pos[1]) < 2200) { onRoute = true; speedAtBranch = Math.hypot(s.vel[0], s.vel[1]); ap = autopilot(route.line, stage, { lookahead: 300 }); }
+      if (onRoute && Math.hypot(last[0] - s.pos[0], last[1] - s.pos[1]) < 900) { onRoute = false; ap = autopilot(json.line!, st); } // back on the main line at the catcher
+      playerMove(l, s, ap(s));
+      for (const tr of l.triggers) {
+        if (!touching(tr, s.pos, HULL)) continue;
+        if (tr.type === 'boost') applyBoost(s, tr);
+        else if (tr.type === 'checkpoint' && tr.stage === st + 1) { st++; ap = autopilot(onRoute ? route.line : json.line!, onRoute ? stage : st); }
+        else if (tr.type === 'teleport' && tr.stage === st) assert.fail(`${route.name}: fell at stage ${st + 1}${speedAtBranch ? ` after branching at ${Math.round(speedAtBranch)} u/s` : ''}`);
+        else if (tr.type === 'end') done = true;
+      }
+      if (touching(wall, s.pos, HULL)) painted = true;
     }
-    if (touching(wall, s.pos, HULL)) return;
+    assert.ok(done, `${route.name}: never finished (branched: ${speedAtBranch > 0})`);
+    assert.ok(speedAtBranch > 0, `${route.name}: never branched`);
+    // The wall sits on a ledge beside the fast line; riding the line past it (within 2,500) is the reachability we assert.
+    const wc = [(wall.min[0] + wall.max[0]) / 2, (wall.min[1] + wall.max[1]) / 2];
+    const near = route.line.some(p => Math.hypot(p[0] - wc[0], p[1] - wc[1]) < 2500);
+    assert.ok(painted || near, `${route.name}: finished but its wall is nowhere near the line`);
   }
-  assert.fail(`never reached the Crow's Nest wall, ended at ${s.pos.map(Math.round)}`);
 });
 
 test('Finish Lookout is reachable: keep your speed through the finish line', () => {

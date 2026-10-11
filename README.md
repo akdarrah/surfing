@@ -5,7 +5,7 @@ Counter-Strike surf, reborn as a browser racing game. Every two minutes everyone
 - **Client:** TypeScript, Three.js on **WebGPU** (automatic WebGL2 fallback) with bloom, ambient occlusion, motion blur, chromatic aberration, lens flare and a physical sky; synthesized audio; full-screen play.
 - **Server:** Rust (tokio + axum). One game-loop task owns all state; sockets talk to it over channels; 2,000 players on ~1 core.
 - **Physics:** the movement code is a port of Source's `gamemovement.cpp`, so it feels like CS surf; collision is Quake-style brush tracing with seam handling for curved ramps.
-- **Level:** `levels/build.mjs` walks the course with a turtle (`straight`, `turn`, `gap`, `stage`, `boost`, `wall`, `perch`), emitting mitered ramp prisms, the ideal racing line, neon edge strips, spray walls and side routes.
+- **Level:** `levels/build.mjs` walks the course with a turtle (`ramp`, `jump`, `land`, `bowl`, `fork`, `stage`, `wall`, `perch`), emitting mitered ramp prisms, the ideal racing line, trim strips, spray walls and both branches of every fork.
 
 ## Run it locally
 
@@ -55,30 +55,35 @@ Joining asks for a callsign (anything up to 24 characters) and a spray: eight bu
 
 ## Spray walls
 
-Thirteen walls. Seven sit beside the racing line (painting one mid-race costs you speed, so it's a choice between the clock and the wall); the rest are the reason to leave it:
+Thirteen walls. Eight sit beside the racing line (painting one mid-race costs you speed, so it's a choice between the clock and the wall); the rest are the reason to leave it:
 
 | | How to get there |
 |---|---|
-| Serpent Island | fly straight off the outside of the Serpent's apex |
-| Crow's Nest | at the top of the Helix, ride the outer face and jump off it |
-| Helix Tower | anywhere in the spiral |
-| High Line | the Gauntlet's narrow upper ramp with the booster, to its dead end |
-| Under the Drop | veer left off the Drop's edge onto the ledge instead of the long fall |
-| Finish Lookout | bunny-hop the finish landing so the flat doesn't eat your speed, fly off the end of the platform |
+| Long Gap Ledge | take the fast line at The Split; the ledge is beside the landing |
+| Spiral Wall | take the fast line at The Pipe; it's at the bottom of the loop |
+| Over the Gap | over-jump the speed gap to the left ledge |
+| Run-in Ledge | drift right off the last landing |
+| Finish Lookout | carry your speed through the finish gate and fly off to the column |
 
 Every wall is free-for-all: whoever reaches it and presses `T` owns it until someone paints over it. `/?wall=N` opens the game looking at wall N.
 
 ## The course: Meridian
 
-Six stages, each teaching one idea, escalating: **The Launch** (one steep ramp and a drop onto a landing ramp pitched to meet the dive), **The Serpent** (long S-bends, with gently climbing straights so you cross the ridge onto the next inside face), **Transfers** (a staircase of offset ramps), **The Helix** (a long climb into a widening 450° spiral around a tower, with the Crow's Nest above it), **The Gauntlet** (a safe low line or the narrow high line with a booster) and **The Drop** (launch off the edge, cross a 3,000-unit gap onto one huge 28° ramp, get slung through the finish).
+Built the way classic CS surf maps are: short ramps, real gaps, more than one way through. Every ramp is a short dive into a climb, you loft off its end across a gap (sized so you make it at 92% of the design speed and a walking start never does) and come down on the next ramp's face. Five sections, with checkpoints between them:
 
-Design rules learned the hard way, encoded in the generator (`levels/build.mjs`) and the tests:
+1. **Start** — two warm-up ramps that build you to speed.
+2. **The Split** — the first fork. Safe: another ramp and gap. Fast: a bigger loft over **The Long Gap**, with a ledge wall beside the landing. Both lines come down on one wide catcher ramp.
+3. **Transfers** — ramp, gap, ramp, gap, then the course turns back on itself.
+4. **The Pipe** — the second fork. Safe: ramp and gap. Fast: **The Spiral**, a full loop away from the safe track with a wall at the bottom.
+5. **Speed Gaps** — the gap only the full line makes; a ledge over the gap for the brave.
+6. **The Run-in** — last ramp, a ledge off the right edge, then the finish gate; carry speed through it and fly off to the **Finish Lookout** column.
 
-- The ridge is continuous from the first ramp to the finish; stage pads are bridges 350 units above it that arrivals surf under and standing starts drop off. A pad in the line is never at a safe height, because a rider sits anywhere from the ridge to a ramp-height below it.
-- A surfer can only recover toward the ridge at ~500 u/s² of lateral acceleration, and a concave pitch change shoves a face-rider outward by about `0.46 · v · Δ`. So pitch changes are eased along a ~4,500-unit radius, nothing eases out of a steep ramp at 4,000 u/s, and a landing ramp is pitched to the angle the dive arrives at.
-- Crossing the ridge always hops you off it; on a climbing straight the hop comes straight back down, on a descent it becomes a long float into a steep landing. The racing line hugs one face through each straight and flips at the end of the straight before a bend.
-- A banked face holds a turn up to `v² ≈ r · g · tanφ` (about 15% over); the course profiles (56° and 66° faces, all 1,280 wide) and bend radii are sized for 3,000 u/s. Never morph the line onto a narrower ramp: riders low on the face lose their floor.
-- Climbs bleed speed; boosters at the pad make standing starts viable on stages that need speed.
+The generator (`levels/build.mjs`) does the physics so the layout stays honest:
+
+- **Speed is tracked by energy** (`v² = v₀² + 2g·drop`, minus a small loss per landing). Each ramp sizes its own climb to bring the speed back to the section's target, and deepens its dive if you are slow, so no section runs away or dies.
+- **Gaps are solved, not guessed:** the landing ramp starts where the 92%-speed parabola comes down and is pitched to its arrival angle; it is made long enough for a full-speed rider, who lands further along at a flatter angle.
+- **Forks** split with a 900-unit strafe each way, run parallel 1,800 apart, and both strafe back onto a 3,200-wide catcher; dry runs measure each branch so the shorter is padded, the lower climbs on its lead-in, and the fast line's launch is solved to come down 250 units into the catcher. A branch that cannot land fails the build.
+- **What the physics allows** (measured with the autopilot): a rider can strafe back toward the ridge at ~800 u/s² on the 51° course profile; every concave pitch change shoves a face-rider outward by ≈0.46·v²/R, so pitch changes are eased on a 5,000-unit radius and kept small (−10° landing → +10° climb); a full loop must drop more than its ramp is deep; checkpoint gates are wider than their pads because riders arrive anywhere across a catcher.
 
 ## Architecture notes
 
