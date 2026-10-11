@@ -71,7 +71,7 @@ Every wall is free-for-all: whoever reaches it and presses `T` owns it until som
 
 ## The course: Meridian
 
-Built the way classic CS surf maps are: short ramps, real gaps, more than one way through. Every ramp is a short dive into a climb, you loft off its end across a gap (sized so you make it at 92% of the design speed and a walking start never does) and come down on the next ramp's face. Five sections, with checkpoints between them:
+Built the way classic CS surf maps are: short ramps, real gaps, more than one way through. Every ramp is a short dive into a climb, you loft off its end across a gap (sized so you make it at 92% of the design speed and a walking start never does) and come down on the next ramp's face. Six sections, with checkpoints between them:
 
 1. **Start** — two warm-up ramps that build you to speed.
 2. **The Split** — the first fork. Safe: another ramp and gap. Fast: a bigger loft over **The Long Gap**, with a ledge wall beside the landing. Both lines come down on one wide catcher ramp.
