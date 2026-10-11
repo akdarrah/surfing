@@ -1,16 +1,17 @@
 import levelJson from '../../levels/meridian.json';
 import { loadLevel, playerMove, touching, applyBoost, hullMax, trace, add, scale, TICK, EYE, DUCK_EYE, type PlayerState, type LevelJSON, type V3 } from './physics.ts';
-import { World, Glider, imageTexture, textureFromCanvas, fmtMs, type WallInfo } from './render.ts';
-import { Net, encodeImage, encodeState, samplePose, type GhostFrame } from './net.ts';
+import { World, imageTexture, textureFromCanvas, fmtMs, BLUE, GLOW, GOLD, type WallInfo } from './render.ts';
+import { Boat } from './boat.ts';
+import { Net, encodeImage, encodeState, samplePose, type GhostFrame, type Snap } from './net.ts';
 import { Audio } from './audio.ts';
 import { autopilot } from './autopilot.ts';
 import { SPRAYS, sprayDataUrl } from './sprays.ts';
+import { Perf } from './perf.ts';
 
 const $ = (id: string) => document.getElementById(id)!;
 const input = (id: string) => $(id) as HTMLInputElement;
 const json = levelJson as unknown as LevelJSON & { props: any[]; walls: any[]; line: any[] };
 const level = loadLevel(json);
-const HULL: V3 = [16, 16, 72];
 const LOBBY_MS = 15000;
 
 // --- profile (localStorage) -------------------------------------------------
@@ -24,7 +25,7 @@ const prof = {
   spray: localStorage.getItem('spray') || sprayDataUrl(SPRAYS[Math.floor(Math.random() * SPRAYS.length)].key),
   sprayKey: localStorage.getItem('sprayKey') || '',
   hide: localStorage.getItem('hideImages') === '1',
-  high: localStorage.getItem('quality') !== 'low',
+  high: localStorage.getItem('quality') === 'high', // default is the light stack (bloom + SMAA); High adds AO + motion blur
 };
 input('name').value = prof.name;
 input('sens').value = localStorage.getItem('sens') || '2';
@@ -36,10 +37,12 @@ input('volSfx').value = String(audio.volumes.sfx);
 input('volMusic').oninput = () => { audio.volumes.music = Number(input('volMusic').value); audio.setVolumes(); };
 input('volSfx').oninput = () => { audio.volumes.sfx = Number(input('volSfx').value); audio.setVolumes(); };
 input('quality').onchange = () => { localStorage.setItem('quality', input('quality').checked ? 'high' : 'low'); location.reload(); };
+input('sens').onchange = () => localStorage.setItem('sens', input('sens').value);
+input('hideImages').onchange = () => { prof.hide = input('hideImages').checked; localStorage.setItem('hideImages', prof.hide ? '1' : ''); refreshImages(); };
 
-// Spray picker: the built-ins, plus a custom upload.
-const picker = $('sprayPicker');
-for (const s of SPRAYS) {
+// Spray pickers (join card + settings): the built-ins, plus a custom upload.
+const pickers = [$('sprayPicker'), $('sprayPicker2')];
+for (const picker of pickers) for (const s of SPRAYS) {
   const img = new Image();
   img.src = sprayDataUrl(s.key);
   img.title = s.name;
@@ -50,10 +53,11 @@ function saveSpray(upload = true) {
   localStorage.setItem('spray', prof.spray);
   localStorage.setItem('sprayKey', prof.sprayKey);
   ($('sprayPreview') as HTMLImageElement).src = prof.spray;
-  for (const img of picker.querySelectorAll('img')) img.classList.toggle('on', img.src === prof.spray);
+  ($('sprayPreview2') as HTMLImageElement).src = prof.spray;
+  for (const picker of pickers) for (const img of picker.querySelectorAll('img')) img.classList.toggle('on', img.src === prof.spray);
   if (upload) { uploaded = ''; uploadSpray(); ownFlag(); }
 }
-saveSpray(false); // `net` and the glider don't exist yet at module load
+saveSpray(false); // `net` and the boat don't exist yet at module load
 async function processImage(file: File) {
   const bmp = await createImageBitmap(file);
   for (const s of [1, 0.75, 0.5]) {
@@ -66,8 +70,8 @@ async function processImage(file: File) {
   }
   throw new Error('too detailed');
 }
-input('sprayFile').onchange = async () => {
-  const f = input('sprayFile').files?.[0];
+for (const id of ['sprayFile', 'sprayFile2']) input(id).onchange = async () => {
+  const f = input(id).files?.[0];
   if (!f) return;
   try { prof.spray = await processImage(f); prof.sprayKey = 'custom'; saveSpray(); }
   catch { banner('THAT IMAGE DIDN\'T WORK, TRY ANOTHER', 2500); }
@@ -76,8 +80,9 @@ const dataUrlBytes = (url: string) => Uint8Array.from(atob(url.split(',')[1]), c
 
 // --- world ------------------------------------------------------------------
 const world = new World($('game'), prof.high);
+const perf = new Perf($('perf'));
 const me: PlayerState = { pos: [...level.spawns[0].pos] as V3, vel: [0, 0, 0], onGround: false, ducked: false };
-let prevPos: V3 = [...me.pos] as V3;
+const prevPos: V3 = [me.pos[0], me.pos[1], me.pos[2]];
 let yaw = level.spawns[0].yaw, pitch = 0;
 let stage = 0, teleported = false, thirdPerson = false;
 let runStart: number | null = null, finished = false, finishMs = 0;
@@ -95,7 +100,7 @@ const keys = new Set<string>();
 type Profile = { id: number; name: string; color: string; spray?: string | null; bot?: boolean };
 const profiles = new Map<number, Profile>();
 const roster = new Map<number, [number, number, number, boolean, boolean]>(); // stage, finishedMs, place, late, bot
-const gliders = new Map<number, Glider>();
+const boats = new Map<number, Boat>();
 const walls = new Map<number, WallInfo>();
 const sprays = new Map<number, { pos: V3; normal: V3; hash: string }>();
 const muted = new Set<number>();
@@ -104,12 +109,18 @@ let uploaded = '';
 let lastContact = 0, wasAirborne = true, shakeT = 0;
 let auto: ReturnType<typeof autopilot> | null = null;
 let chatting = false;
+let chatClosedAt = -1e9;
+let boardDirty = true;
 
-const myGlider = new Glider('#ffb000', prof.name);
-const ghost = new Glider(0xffffff, '', '', true);
-myGlider.addTo(world.scene);
+const myBoat = new Boat('#ffb84a', prof.name);
+const ghost = new Boat(0xffffff, '', '', true);
+myBoat.addTo(world.scene);
 ghost.addTo(world.scene);
 ghost.visible = false;
+
+// Scratch space reused every frame (no allocations in the loop).
+const pos: V3 = [0, 0, 0], look: V3 = [1, 0, 0], scratch: V3 = [0, 0, 0], ghostPos: V3 = [0, 0, 0];
+const snap: Snap = { t: 0, pos: [0, 0, 0], yaw: 0, pitch: 0, flags: 0 };
 
 const say = (text: string) => { feed.push({ text, until: performance.now() + 6500 }); if (feed.length > 6) feed.shift(); };
 function banner(text: string, ms = 3000) {
@@ -135,11 +146,11 @@ function respawn(s: number) {
   const sp = level.spawns[s];
   me.pos = [...sp.pos] as V3;
   me.vel = [0, 0, 0];
-  prevPos = [...me.pos] as V3;
+  prevPos[0] = me.pos[0]; prevPos[1] = me.pos[1]; prevPos[2] = me.pos[2];
   yaw = sp.yaw;
   pitch = 0;
   teleported = true;
-  myGlider.resetTrail();
+  myBoat.resetTrail();
   if (auto) auto = autopilot(json.line, stage);
 }
 
@@ -149,14 +160,14 @@ function newRound() {
   finished = false;
 }
 
-// --- images: sprays on gliders, walls and the level --------------------------
+// --- images: sprays on sails, walls and the level ----------------------------
 const showImages = (id: number) => !prof.hide && !muted.has(id);
 function defaultSprayFor(id: number) { return sprayDataUrl(SPRAYS[id % SPRAYS.length].key); }
 function applyFlag(id: number) {
-  const g = gliders.get(id), p = profiles.get(id);
+  const g = boats.get(id), p = profiles.get(id);
   if (!g) return;
-  if (p?.spray && showImages(id)) imageTexture(p.spray).then(({ tex }) => gliders.get(id)?.setFlag(tex), () => {});
-  else if (p?.bot) dataUrlTexture(defaultSprayFor(id)).then(t => gliders.get(id)?.setFlag(t));
+  if (p?.spray && showImages(id)) imageTexture(p.spray).then(({ tex }) => boats.get(id)?.setFlag(tex), () => {});
+  else if (p?.bot) dataUrlTexture(defaultSprayFor(id)).then(t => boats.get(id)?.setFlag(t));
   else g.setFlag(null);
 }
 function dataUrlTexture(url: string) {
@@ -166,7 +177,7 @@ function dataUrlTexture(url: string) {
     img.src = url;
   });
 }
-function ownFlag() { dataUrlTexture(prof.spray).then(t => myGlider.setFlag(t)); }
+function ownFlag() { dataUrlTexture(prof.spray).then(t => myBoat.setFlag(t)); }
 function uploadSpray() {
   if (prof.spray && uploaded !== prof.spray && net.connected) { net.send(encodeImage(dataUrlBytes(prof.spray))); uploaded = prof.spray; }
 }
@@ -181,7 +192,7 @@ function applySpray(id: number) {
   imageTexture(s.hash).then(({ tex }) => sprays.get(id) === s && world.setDecal(`s${id}`, tex, s.pos, s.normal, 96), () => {});
 }
 function refreshImages() {
-  for (const id of gliders.keys()) applyFlag(id);
+  for (const id of boats.keys()) applyFlag(id);
   for (const w of json.walls) paintWall(w.id);
   for (const id of sprays.keys()) applySpray(id);
   ownFlag();
@@ -201,12 +212,13 @@ const net = new Net({
         setPhase(m.round.phase, m.round.endsAt, m.round.go, m.round.now, m.round.results, true);
         refreshImages();
         uploaded = ''; uploadSpray();
+        boardDirty = true;
         if (introWall && world.wallInfo(introWall)) { introUntil = performance.now() + 7000; const w = walls.get(introWall); banner(w ? `${w.name.toUpperCase()}'S SPRAY · ${world.wallInfo(introWall)!.name.toUpperCase()}` : world.wallInfo(introWall)!.name.toUpperCase(), 7000); }
         break;
       }
-      case 'join': profiles.set(m.id, m); if (m.id !== myId) chatLog(`${esc(m.name)} joined`, true); break;
-      case 'profile': profiles.set(m.id, m); applyFlag(m.id); break;
-      case 'leave': { const g = gliders.get(m.id); if (g) g.removeFrom(world.scene); gliders.delete(m.id); profiles.delete(m.id); roster.delete(m.id); sprays.delete(m.id); world.removeDecal(`s${m.id}`); break; }
+      case 'join': profiles.set(m.id, m); boardDirty = true; if (m.id !== myId) chatLog(`${esc(m.name)} joined`, true); break;
+      case 'profile': profiles.set(m.id, m); applyFlag(m.id); boardDirty = true; break;
+      case 'leave': { const g = boats.get(m.id); if (g) g.removeFrom(world.scene); boats.delete(m.id); profiles.delete(m.id); roster.delete(m.id); sprays.delete(m.id); world.removeDecal(`s${m.id}`); boardDirty = true; break; }
       case 'round': setPhase(m.phase, m.endsAt, m.go, m.now, m.results); break;
       case 'placed': chatLog(`${esc(m.name)} finished ${ordinal(m.place)} · ${fmtMs(m.ms)}`, true); break;
       case 'finish':
@@ -219,11 +231,11 @@ const net = new Net({
       case 'record': record = m.record; if (record && myId !== -1) chatLog(`new record: ${esc(record.name)} ${fmtMs(record.ms)}`, true); break;
       case 'wall': walls.set(m.wall.id, m.wall); paintWall(m.wall.id); chatLog(`${esc(m.name)} sprayed ${esc(m.wallName)}`, true); if (m.by !== myId) audio.claim(); else { audio.claim(); banner(`${String(m.wallName).toUpperCase()} IS YOURS`, 2500); } break;
       case 'unwall': for (const id of m.ids) { walls.delete(id); paintWall(id); } break;
-      case 'spray': sprays.set(m.id, { pos: m.pos, normal: m.normal, hash: m.hash }); applySpray(m.id); world.puff(m.pos, 14, 0x555555, 0.5); if (m.id === myId) audio.whoosh(); break;
+      case 'spray': sprays.set(m.id, { pos: m.pos, normal: m.normal, hash: m.hash }); applySpray(m.id); world.puff(m.pos, 14, 0xdfe8f5, 0.5); if (m.id === myId) audio.whoosh(); break;
       case 'chat': if (!muted.has(m.id)) { chatLog(`<b style="color:${esc(m.color)}">${esc(m.name)}</b>: ${esc(m.text)}`); } break;
       case 'clearImages': for (const p of profiles.values()) p.spray = null; sprays.clear(); refreshImages(); break;
-      case 'roster': roster.clear(); for (const [id, st, ms, pl, late, bot] of m.p) roster.set(id, [st, ms, pl, late, bot]); break;
-      case 'board': board = m; break;
+      case 'roster': roster.clear(); for (const [id, st, ms, pl, late, bot] of m.p) roster.set(id, [st, ms, pl, late, bot]); boardDirty = true; break;
+      case 'board': board = m; boardDirty = true; break;
       case 'split': say(`STAGE ${m.stage} ✓ ${fmtMs(m.ms)}`); break;
       case 'invalid': say(`RUN NOT COUNTED: ${m.reason}`); break;
       case 'notice': banner(String(m.text).toUpperCase(), 3000); break;
@@ -264,32 +276,58 @@ function showPodium(results: { top: { id: number; place: number; ms: number; nam
   setTimeout(() => (el.hidden = true), 6000);
 }
 
-// --- input + full screen -----------------------------------------------------
+// --- input, full screen, settings ---------------------------------------------
 const canvas = world.renderer.domElement;
-function launch(fullscreen: boolean) {
-  if (fullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => canvas.requestPointerLock());
-  else canvas.requestPointerLock();
+const inGame = () => !$('hud').hidden;
+function lockPointer() {
+  // Lock inside the gesture; after a fullscreen transition `fullscreenchange` re-locks.
+  const p = canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+  p?.catch?.(() => {});
+}
+function launch() {
   prof.name = input('name').value.trim() || callsign();
-  prof.hide = input('hideImages').checked;
   localStorage.setItem('name', prof.name);
-  localStorage.setItem('sens', input('sens').value);
-  localStorage.setItem('hideImages', prof.hide ? '1' : '');
-  myGlider.setName(prof.name);
+  myBoat.setName(prof.name);
   audio.start();
   refreshImages();
   if (!net.ws) net.connect(() => ({ name: prof.name }));
   else uploadSpray();
   $('hud').hidden = false;
+  $('menu').hidden = true;
+  if (!document.fullscreenElement && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().then(lockPointer, lockPointer);
+  else lockPointer();
 }
-document.addEventListener('fullscreenchange', () => { if (document.fullscreenElement && document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
-document.addEventListener('pointerlockerror', () => { $('menu').hidden = true; banner('CLICK THE GAME TO GRAB THE MOUSE', 4000); });
-$('play').onclick = () => launch(false);
-$('playFs').onclick = () => launch(true);
-canvas.onclick = () => { if (!$('menu').hidden) return; canvas.requestPointerLock(); };
+function openSettings() {
+  $('settings').hidden = false;
+  $('menu').hidden = true;
+  $('resumeHint').textContent = '';
+  renderPlayers();
+  keys.clear();
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+function resume() {
+  $('settings').hidden = true;
+  lockPointer();
+}
+document.addEventListener('fullscreenchange', () => { if (document.fullscreenElement && document.pointerLockElement !== canvas && inGame() && $('settings').hidden) lockPointer(); });
+document.addEventListener('pointerlockerror', () => {
+  if (!inGame()) return;
+  // Escape-in-chat only closes the chat: if the relock after it is refused, say so without opening settings.
+  if (performance.now() - chatClosedAt < 1500) { banner('CLICK THE GAME TO GRAB THE MOUSE', 2500); return; }
+  // Chrome refuses a re-lock for about a second after an Escape exit: keep the overlay up and say so.
+  openSettings();
+  $('resumeHint').textContent = 'Couldn\'t grab the mouse yet — click RESUME again or click the game.';
+});
+$('play').onclick = launch;
+$('resume').onclick = resume;
+$('gear').onclick = openSettings;
+canvas.onclick = () => { if (!$('menu').hidden) return; if (!$('settings').hidden) { resume(); return; } lockPointer(); };
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
-  $('menu').hidden = locked || chatting;
-  if (!locked) { keys.clear(); renderPlayers(); }
+  if (locked) { $('menu').hidden = true; $('settings').hidden = true; return; }
+  keys.clear();
+  if (chatting || performance.now() - chatClosedAt < 500) return;
+  if (inGame()) openSettings(); else $('menu').hidden = false;
 });
 document.addEventListener('mousemove', e => {
   if (document.pointerLockElement !== canvas || chatting) return;
@@ -308,17 +346,21 @@ function openChat() {
 function closeChat(send: boolean) {
   const text = chatInput.value.trim();
   chatting = false;
+  chatClosedAt = performance.now();
   $('chatLine').hidden = true;
   chatInput.blur();
-  if (send && text) { if (net.connected) net.send({ t: 'chat', text }); else chatLog(`<b style="color:#ffb000">${esc(prof.name)}</b>: ${esc(text)}`); }
+  if (send && text) { if (net.connected) net.send({ t: 'chat', text }); else chatLog(`<b style="color:#ffb84a">${esc(prof.name)}</b>: ${esc(text)}`); }
   canvas.focus();
+  if (document.pointerLockElement !== canvas && inGame()) lockPointer();
 }
 chatInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') closeChat(true); else if (e.key === 'Escape') closeChat(false); });
 addEventListener('keydown', e => {
+  if (e.code === 'F3') { e.preventDefault(); perf.toggle(); return; }
   if (chatting) return;
   if (e.code === 'F11' || (e.altKey && e.code === 'Enter')) { e.preventDefault(); document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); return; }
+  if (e.code === 'Escape' && inGame() && document.pointerLockElement !== canvas) { e.preventDefault(); if ($('settings').hidden) openSettings(); else resume(); return; }
   if (!$('podium').hidden && e.code !== 'Tab') $('podium').hidden = true;
-  if ($('hud').hidden) return;
+  if (!inGame()) return;
   if (e.code === 'KeyY' && !e.repeat) { e.preventDefault(); openChat(); return; }
   if (document.pointerLockElement !== canvas) return;
   if (['Tab', 'Space', 'ControlLeft', 'KeyW', 'KeyS'].includes(e.code)) e.preventDefault();
@@ -355,7 +397,7 @@ const aim = (): V3 => [Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.s
 function spray() {
   const maxs = hullMax(me);
   const wall = level.triggers.find(t => t.type === 'wall' && touching(t, me.pos, maxs)) as (typeof level.triggers[number] & { id?: number }) | undefined;
-  if (wall) { net.send({ t: 'wall', id: wall.id }); world.sparks(me.pos, [0, 0, 1], 12, 0xff2bd6); return; }
+  if (wall) { net.send({ t: 'wall', id: wall.id }); world.sparks(me.pos, [0, 0, 1], 12, BLUE); return; }
   const o = eye();
   const tr = trace(level, o, add(o, scale(aim(), 400)), [0, 0, 0], [0, 0, 0]);
   if (tr.fraction === 1 || !tr.normal) return banner('GET CLOSER TO A SURFACE', 1000);
@@ -363,10 +405,11 @@ function spray() {
 }
 
 // --- simulation -------------------------------------------------------------
+const UP: V3 = [0, 0, 1];
 function tick(now: number) {
   const locked = phase === 'lobby' || introUntil > now || chatting;
   const k = (c: string) => (!locked && keys.has(c) ? 1 : 0);
-  prevPos = [...me.pos] as V3;
+  prevPos[0] = me.pos[0]; prevPos[1] = me.pos[1]; prevPos[2] = me.pos[2];
   if (auto && !locked) { const inp = auto(me); yaw = inp.yaw; playerMove(level, me, inp); }
   else playerMove(level, me, { forward: k('KeyW') - k('KeyS'), side: k('KeyD') - k('KeyA'), jump: !!k('Space'), duck: !!(k('ControlLeft') || k('KeyC')), yaw });
   const maxs = hullMax(me);
@@ -374,23 +417,25 @@ function tick(now: number) {
     if (!touching(t, me.pos, maxs)) continue;
     if (t.type === 'start') { runStart = now; finished = false; }
     else if (t.type === 'teleport' && t.stage === stage) { respawn(stage); audio.fail(); shakeT = 0.4; }
-    else if (t.type === 'checkpoint' && t.stage === stage + 1) { stage++; audio.gate(); world.sparks(me.pos, [0, 0, 1], 24, 0x35f0ff); if (auto) auto = autopilot(json.line, stage); }
+    else if (t.type === 'checkpoint' && t.stage === stage + 1) { stage++; audio.gate(); world.sparks(me.pos, UP, 24, GLOW); if (auto) auto = autopilot(json.line, stage); }
     else if (t.type === 'end' && !finished && runStart !== null) { finished = true; finishMs = now - runStart; if (phase === 'solo') { banner(`FINISHED  ${fmtMs(finishMs)}`, 4000); audio.finish(); } }
-    else if (t.type === 'boost') { const before = Math.hypot(me.vel[0], me.vel[1]); applyBoost(me, t); if (Math.hypot(me.vel[0], me.vel[1]) > before + 50) { audio.boost(); world.sparks(me.pos, t.dir!, 30, 0xffb000); } }
+    else if (t.type === 'boost') { const before = Math.hypot(me.vel[0], me.vel[1]); applyBoost(me, t); if (Math.hypot(me.vel[0], me.vel[1]) > before + 50) { audio.boost(); world.sparks(me.pos, t.dir!, 30, GOLD); } }
   }
   const onRamp = !!me.contact && me.contact[2] < 0.7 && me.contact[2] > -0.5;
   if (onRamp) {
-    if (wasAirborne && now - lastContact > 150) { audio.touchdown(); shakeT = Math.max(shakeT, 0.15); world.sparks(me.pos, [0, 0, 1], 6); }
+    if (wasAirborne && now - lastContact > 150) { audio.touchdown(); shakeT = Math.max(shakeT, 0.15); world.sparks(me.pos, UP, 6); }
     lastContact = now; wasAirborne = false;
   } else if (!wasAirborne && !me.onGround && now - lastContact > 60) { wasAirborne = true; if (Math.hypot(me.vel[0], me.vel[1]) > 600) audio.liftoff(); }
 }
 
-let acc = 0, last = performance.now(), sendAcc = 0;
+let acc = 0, last = performance.now(), sendAcc = 0, lastHud = 0, lastLeader = 0;
 function frame(now: number) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.25, (now - last) / 1000);
+  const frameMs = now - last;
   last = now;
   acc += dt;
+  const physT0 = performance.now();
   while (acc >= TICK) {
     tick(performance.now());
     acc -= TICK;
@@ -400,12 +445,17 @@ function frame(now: number) {
       teleported = false;
     }
   }
+  const newScale = perf.sample(now, frameMs, performance.now() - physT0);
+  if (newScale) world.setRenderScale(newScale);
   const t = now / 1000;
   const alpha = acc / TICK;
-  const pos = [0, 1, 2].map(i => prevPos[i] + (me.pos[i] - prevPos[i]) * alpha) as V3;
+  pos[0] = prevPos[0] + (me.pos[0] - prevPos[0]) * alpha;
+  pos[1] = prevPos[1] + (me.pos[1] - prevPos[1]) * alpha;
+  pos[2] = prevPos[2] + (me.pos[2] - prevPos[2]) * alpha;
   const speed = Math.hypot(me.vel[0], me.vel[1]);
   const cam = world.camera;
-  const look = aim();
+  const cp = Math.cos(pitch);
+  look[0] = cp * Math.cos(yaw); look[1] = cp * Math.sin(yaw); look[2] = Math.sin(pitch);
 
   const introW = introUntil > now ? world.wallInfo(introWall) : null;
   if (introW) {
@@ -413,37 +463,37 @@ function frame(now: number) {
     const d = introW.w * 1.1;
     cam.position.set(introW.pos[0] + Math.cos(yawR) * d, introW.pos[1] + Math.sin(yawR) * d, introW.pos[2] + 80 + Math.sin(t) * 20);
     cam.lookAt(introW.pos[0], introW.pos[1], introW.pos[2]);
-    myGlider.visible = false;
+    myBoat.visible = false;
   } else if (fly.on && phase === 'lobby') {
     flythrough();
-    myGlider.visible = true;
+    myBoat.visible = true;
   } else {
-    if (thirdPerson) { cam.position.set(...add(pos, add(scale(look, -240), [0, 0, 80]))); myGlider.visible = true; }
-    else { cam.position.set(pos[0], pos[1], pos[2] + (me.ducked ? DUCK_EYE : EYE)); myGlider.visible = false; }
+    if (thirdPerson) { cam.position.set(pos[0] - look[0] * 260, pos[1] - look[1] * 260, pos[2] - look[2] * 260 + 90); myBoat.visible = true; }
+    else { cam.position.set(pos[0], pos[1], pos[2] + (me.ducked ? DUCK_EYE : EYE)); myBoat.visible = false; }
     cam.lookAt(cam.position.x + look[0], cam.position.y + look[1], cam.position.z + look[2]);
     if (shakeT > 0) { shakeT -= dt; cam.position.x += (Math.random() - 0.5) * shakeT * 14; cam.position.z += (Math.random() - 0.5) * shakeT * 14; }
   }
-  world.shadowTarget.position.set(...pos);
+  world.shadowTarget.position.set(pos[0], pos[1], pos[2]);
   world.speedFx(fly.on ? 0 : speed, dt);
-  myGlider.pose(pos, yaw, t, finished);
-  if (speed > 900 && Math.random() < speed / 6000) world.puff(add(pos, [0, 0, 20]), 4 + Math.random() * 6, 0x8fa8c8, 0.5);
+  myBoat.pose(pos, yaw, t, finished);
+  if (speed > 900 && Math.random() < speed / 6000) { scratch[0] = pos[0]; scratch[1] = pos[1]; scratch[2] = pos[2] + 20; world.puff(scratch, 4 + Math.random() * 6, 0xd8e6f8, 0.5); }
 
   const rt = net.renderTime();
   for (const r of net.remotes.values()) {
     if (r.id === myId) continue;
-    let g = gliders.get(r.id);
+    let g = boats.get(r.id);
     if (!g) {
       const p = profiles.get(r.id);
-      g = new Glider(p?.color ?? '#888', p?.name ?? '?');
-      gliders.set(r.id, g);
+      g = new Boat(p?.color ?? '#888', p?.name ?? '?');
+      boats.set(r.id, g);
       g.addTo(world.scene);
       applyFlag(r.id);
     }
-    const p = samplePose(r, rt);
-    g.visible = !!p;
-    if (p) g.pose(p.pos, p.yaw, t, !!(p.flags & 2));
+    const ok = samplePose(r, rt, snap);
+    g.visible = ok;
+    if (ok) g.pose(snap.pos, snap.yaw, t, !!(snap.flags & 2));
   }
-  for (const [id, g] of gliders) if (!net.remotes.has(id)) { g.removeFrom(world.scene); gliders.delete(id); }
+  for (const [id, g] of boats) if (!net.remotes.has(id)) { g.removeFrom(world.scene); boats.delete(id); }
 
   const gStart = runStart ?? (phase === 'race' ? goAt - net.offset : null);
   if (ghostOn && ghostFrames.length && gStart !== null && !finished) {
@@ -452,15 +502,30 @@ function frame(now: number) {
     if (i + 1 < ghostFrames.length) {
       const a = ghostFrames[i], b = ghostFrames[i + 1];
       ghost.visible = true;
-      ghost.pose([0, 1, 2].map(j => a.pos[j] + (b.pos[j] - a.pos[j]) * f) as V3, a.yaw, t);
+      for (let j = 0; j < 3; j++) ghostPos[j] = a.pos[j] + (b.pos[j] - a.pos[j]) * f;
+      ghost.pose(ghostPos, a.yaw, t);
     } else ghost.visible = false;
   } else ghost.visible = false;
 
+  // The giant watches whoever is furthest along the course.
+  if (now - lastLeader > 500) {
+    lastLeader = now;
+    let best = stage, bx = pos[0], by = pos[1];
+    for (const [id, r] of roster) {
+      if (id === myId || r[2] > 0) continue;
+      const g = boats.get(id);
+      if (g && r[0] > best) { best = r[0]; bx = g.group.position.x; by = g.group.position.y; }
+    }
+    world.giantLookAt(bx, by);
+  }
+
   audio.update(speed, !!me.contact && me.contact[2] < 0.7 && me.contact[2] > -0.5, phase === 'race' || phase === 'solo');
-  world.tickSky(t, dt, fly.on ? 0 : speed, fly.on ? [0, 0, 0] : me.vel);
+  world.tickSky(t, dt, fly.on ? 0 : speed, fly.on ? UP : me.vel);
   world.tickFx(t, dt);
   world.render();
-  hud(now, speed);
+  perf.rendered(world.renderer);
+  if (now - lastHud > 100) { lastHud = now; hud(now, speed); }
+  perf.draw(now);
 }
 
 // Lobby flythrough along the racing line for the first 12 s, then the start gate for the countdown.
@@ -478,44 +543,60 @@ function flythrough() {
   const i = Math.min(line.length - 2, Math.floor(prog * (line.length - 1)));
   const f = prog * (line.length - 1) - i;
   const a = line[i], b = line[i + 1], c = line[Math.min(line.length - 1, i + 10)];
-  const p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
-  const dx = c[0] - p[0], dy = c[1] - p[1], L = Math.hypot(dx, dy) || 1;
-  cam.position.set(p[0] - dx / L * 900 - dy / L * 700, p[1] - dy / L * 900 + dx / L * 700, p[2] + 900);
+  const px = a[0] + (b[0] - a[0]) * f, py = a[1] + (b[1] - a[1]) * f, pz = a[2] + (b[2] - a[2]) * f;
+  const dx = c[0] - px, dy = c[1] - py, L = Math.hypot(dx, dy) || 1;
+  cam.position.set(px - dx / L * 900 - dy / L * 700, py - dy / L * 900 + dx / L * 700, pz + 900);
   cam.lookAt(c[0], c[1], c[2] - 100);
 }
 
-// --- HUD ----------------------------------------------------------------------
+// --- HUD (10 Hz, DOM touched only when text changes) ----------------------------
+const hudCache = new Map<string, string>();
+function setText(id: string, s: string, html = false) {
+  if (hudCache.get(id) === s) return;
+  hudCache.set(id, s);
+  const el = $(id);
+  if (html) el.innerHTML = s; else el.textContent = s;
+}
+const speedEl = $('speed').firstElementChild as HTMLElement;
+let lastSpeedText = '';
+let lastBoard = 0;
 function hud(now: number, speed: number) {
-  ($('speed').firstElementChild as HTMLElement).textContent = String(Math.round(speed));
-  $('timer').textContent = runStart === null ? '' : finished ? fmtMs(finishMs) : fmtMs(Math.max(0, now - runStart));
-  $('stage').textContent = `${level.spawns[stage]?.name ?? ''}  ·  ${stage + 1} / ${level.spawns.length}`;
+  const st = String(Math.round(speed));
+  if (st !== lastSpeedText) { lastSpeedText = st; speedEl.textContent = st; }
+  setText('timer', runStart === null ? '' : finished ? fmtMs(finishMs) : fmtMs(Math.max(0, now - runStart)));
+  setText('stage', `${level.spawns[stage]?.name ?? ''}  ·  ${stage + 1} / ${level.spawns.length}`);
   const left = Math.max(0, phaseEndsAt - net.serverNow());
   if (phase === 'lobby') {
     const s = Math.ceil(left / 1000);
-    $('round').innerHTML = `LOBBY<br><b>${fmtMs(left).slice(0, -3)}</b>`;
-    $('hint').textContent = s > 3 ? 'NEXT LAUNCH · EVERYONE GOES AT ONCE' : '';
+    setText('round', `LOBBY<br><b>${fmtMs(left).slice(0, -3)}</b>`, true);
+    setText('hint', s > 3 ? 'NEXT LAUNCH · EVERYONE GOES AT ONCE' : '');
     const cd = $('countdown');
-    if (s <= 3 && s >= 1) { cd.hidden = false; cd.textContent = String(s); if (s !== lastCount) { audio.countdown(false); lastCount = s; } } else cd.hidden = true;
+    if (s <= 3 && s >= 1) { cd.hidden = false; setText('countdown', String(s)); if (s !== lastCount) { audio.countdown(false); lastCount = s; } } else cd.hidden = true;
   } else if (phase === 'race') {
-    const racing = [...roster.values()].filter(r => !r[3]);
-    const ahead = racing.filter(r => (r[2] > 0 && !finished) || (r[2] === 0 && r[0] > stage && !finished)).length;
+    let racing = 0, ahead = 0;
+    for (const r of roster.values()) {
+      if (r[3]) continue;
+      racing++;
+      if ((r[2] > 0 && !finished) || (r[2] === 0 && r[0] > stage && !finished)) ahead++;
+    }
     const myPlace = finished ? (roster.get(myId)?.[2] || 0) : ahead + 1;
-    $('race').innerHTML = `<b>${myPlace ? ordinal(myPlace) : '—'}</b>OF ${Math.max(racing.length, myPlace, 1)}`; // a late joiner still counts themselves
-    $('round').innerHTML = `RACE<br><b>${fmtMs(left).slice(0, -3)}</b>`;
+    setText('race', `<b>${myPlace ? ordinal(myPlace) : '—'}</b>OF ${Math.max(racing, myPlace, 1)}`, true); // a late joiner still counts themselves
+    setText('round', `RACE<br><b>${fmtMs(left).slice(0, -3)}</b>`, true);
     const inWall = level.triggers.find(t => t.type === 'wall' && touching(t, me.pos, hullMax(me))) as any;
-    $('hint').textContent = inWall ? `PRESS T TO SPRAY ${String(world.wallInfo(inWall.id)?.name ?? 'THIS WALL').toUpperCase()}` : runStart === null && !finished ? 'GO · LEAVE THE START GATE TO BEGIN YOUR RUN' : record && !finished ? `RECORD ${fmtMs(record.ms)} · ${record.name}` : '';
+    setText('hint', inWall ? `PRESS T TO SPRAY ${String(world.wallInfo(inWall.id)?.name ?? 'THIS WALL').toUpperCase()}` : runStart === null && !finished ? 'GO · LEAVE THE START GATE TO BEGIN YOUR RUN' : record && !finished ? `RECORD ${fmtMs(record.ms)} · ${record.name}` : '');
     $('countdown').hidden = true;
   } else {
-    $('round').innerHTML = `OFFLINE<br><b>SOLO</b>`;
-    $('hint').textContent = record ? `RECORD ${fmtMs(record.ms)}` : '';
+    setText('round', `OFFLINE<br><b>SOLO</b>`, true);
+    setText('hint', record ? `RECORD ${fmtMs(record.ms)}` : '');
   }
-  if (phase !== 'race') $('race').innerHTML = '';
+  if (phase !== 'race') setText('race', '', true);
   while (feed.length && feed[0].until < now) feed.shift();
-  $('feed').innerHTML = feed.map(f => `<div>${esc(f.text)}</div>`).join('');
+  setText('feed', feed.map(f => `<div>${esc(f.text)}</div>`).join(''), true);
   for (const c of chatLines) c.el.classList.toggle('faded', now - c.at > 12000 && !chatting);
   const show = keys.has('Tab');
-  $('board').hidden = !show;
-  if (show) scoreboard();
+  const b = $('board');
+  if (b.hidden === show) b.hidden = !show;
+  if (show && (boardDirty || now - lastBoard > 1000)) { boardDirty = false; lastBoard = now; scoreboard(); }
 }
 
 function scoreboard() {
@@ -536,6 +617,6 @@ const esc = (s: string) => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(
   await world.init();
   world.buildLevel(level, json);
   ownFlag();
-  if (import.meta.env.DEV) (window as any).skysurf = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson), net, world, setPhase, tab: (on: boolean) => (on ? keys.add('Tab') : keys.delete('Tab')), fly: (on: boolean) => (fly.on = on), auto: (on: boolean) => (auto = on ? autopilot(json.line, stage) : null), audio, spray, openChat, closeChat, state: () => ({ phase, stage, runStart, finished, finishMs, myId, walls: [...walls.values()], record, ghostFrames: ghostFrames.length, ghostVisible: ghost.visible, locked: document.pointerLockElement === canvas, players: profiles.size }) };
+  if (import.meta.env.DEV) (window as any).skysurf = { me, look: (y: number, p: number) => { yaw = y; pitch = p; }, cam: () => (thirdPerson = !thirdPerson), net, world, setPhase, tab: (on: boolean) => (on ? keys.add('Tab') : keys.delete('Tab')), fly: (on: boolean) => (fly.on = on), auto: (on: boolean) => (auto = on ? autopilot(json.line, stage) : null), audio, spray, openChat, closeChat, openSettings, resume, launch, perf: () => perf.stats(), state: () => ({ phase, stage, runStart, finished, finishMs, myId, walls: [...walls.values()], record, ghostFrames: ghostFrames.length, ghostVisible: ghost.visible, locked: document.pointerLockElement === canvas, players: profiles.size, settings: !$('settings').hidden, menu: !$('menu').hidden, scale: world.scale }) };
   requestAnimationFrame(frame);
 })();

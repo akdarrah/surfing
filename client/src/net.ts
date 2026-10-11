@@ -8,15 +8,18 @@ import type { V3 } from './physics.ts';
 
 const TAU = Math.PI * 2;
 const QUANT = 2; // i16 positions are in 2-unit steps
+const RING = 32; // snapshots kept per remote
 
+const stateBuf = new ArrayBuffer(18);
+const stateView = new DataView(stateBuf);
 export function encodeState(pos: V3, yaw: number, pitch: number, flags: number) {
-  const b = new DataView(new ArrayBuffer(18));
+  const b = stateView;
   b.setUint8(0, 1);
-  pos.forEach((v, i) => b.setFloat32(1 + i * 4, v, true));
+  b.setFloat32(1, pos[0], true); b.setFloat32(5, pos[1], true); b.setFloat32(9, pos[2], true);
   b.setUint16(13, Math.round((((yaw % TAU) + TAU) % TAU) / TAU * 65535), true);
   b.setInt16(15, Math.round((pitch / (Math.PI / 2)) * 32767), true);
   b.setUint8(17, flags);
-  return b.buffer;
+  return stateBuf;
 }
 
 export function encodeImage(img: Uint8Array) {
@@ -27,7 +30,8 @@ export function encodeImage(img: Uint8Array) {
 }
 
 export type Snap = { t: number; pos: V3; yaw: number; pitch: number; flags: number };
-export type Remote = { id: number; snaps: Snap[] };
+// Snapshots live in a ring of typed arrays: no objects per packet, no Array.shift.
+export type Remote = { id: number; t: Float64Array; p: Float32Array; yaw: Float32Array; pitch: Float32Array; flags: Uint8Array; head: number; len: number };
 export type GhostFrame = { pos: V3; yaw: number };
 
 export type Handlers = {
@@ -57,13 +61,13 @@ export class Net {
     this.ws.send(data instanceof ArrayBuffer ? data : JSON.stringify(data));
   }
 
-  // Server clock as seen by this client; remote gliders render 100ms behind it so we always interpolate.
+  // Server clock as seen by this client; remote boats render 100ms behind it so we always interpolate.
   serverNow() { return performance.now() + this.offset; }
   renderTime() { return this.serverNow() - 100; }
 
   private remote(id: number) {
     let r = this.remotes.get(id);
-    if (!r) this.remotes.set(id, (r = { id, snaps: [] }));
+    if (!r) this.remotes.set(id, (r = { id, t: new Float64Array(RING), p: new Float32Array(RING * 3), yaw: new Float32Array(RING), pitch: new Float32Array(RING), flags: new Uint8Array(RING), head: 0, len: 0 }));
     return r;
   }
 
@@ -79,16 +83,15 @@ export class Net {
         o += 7;
         for (let i = 0; i < n; i++, o += 11) {
           const r = this.remote(b.getUint16(o, true));
-          const snap: Snap = {
-            t,
-            pos: [b.getInt16(o + 2, true) * QUANT, b.getInt16(o + 4, true) * QUANT, b.getInt16(o + 6, true) * QUANT],
-            yaw: (b.getUint8(o + 8) / 256) * TAU,
-            pitch: (b.getInt8(o + 9) / 127) * (Math.PI / 2),
-            flags: b.getUint8(o + 10),
-          };
-          const last = r.snaps[r.snaps.length - 1];
-          if (!last || t > last.t) r.snaps.push(snap);
-          if (r.snaps.length > 30) r.snaps.shift();
+          const lastT = r.len ? r.t[(r.head + r.len - 1) % RING] : -Infinity;
+          if (t <= lastT) continue;
+          const k = (r.head + r.len) % RING;
+          if (r.len === RING) r.head = (r.head + 1) % RING; else r.len++;
+          r.t[k] = t;
+          r.p[k * 3] = b.getInt16(o + 2, true) * QUANT; r.p[k * 3 + 1] = b.getInt16(o + 4, true) * QUANT; r.p[k * 3 + 2] = b.getInt16(o + 6, true) * QUANT;
+          r.yaw[k] = (b.getUint8(o + 8) / 256) * TAU;
+          r.pitch[k] = (b.getInt8(o + 9) / 127) * (Math.PI / 2);
+          r.flags[k] = b.getUint8(o + 10);
         }
       } else if (type === 3) {
         const n = b.getUint16(o + 1, true);
@@ -101,23 +104,27 @@ export class Net {
   }
 }
 
-// Interpolated pose of a remote at server time t; null if we have nothing recent.
-export function samplePose(r: Remote, t: number): Snap | null {
-  const s = r.snaps;
-  // Far gliders only refresh every few seconds on a busy server, so keep showing them a while.
-  if (!s.length || t - s[s.length - 1].t > 12000) return null;
-  let i = s.length - 1;
-  while (i > 0 && s[i - 1].t > t) i--;
-  const a = s[Math.max(0, i - 1)], b = s[i];
-  if (a === b || t >= b.t) return b;
-  const k = Math.max(0, Math.min(1, (t - a.t) / (b.t - a.t)));
-  let dy = b.yaw - a.yaw;
+// Interpolated pose of a remote at server time t, written into `out`; false if we have nothing recent.
+export function samplePose(r: Remote, t: number, out: Snap) {
+  if (!r.len) return false;
+  const newest = (r.head + r.len - 1) % RING;
+  // Far boats only refresh every few seconds on a busy server, so keep showing them a while.
+  if (t - r.t[newest] > 12000) return false;
+  let i = r.len - 1;
+  while (i > 0 && r.t[(r.head + i - 1) % RING] > t) i--;
+  const ia = (r.head + Math.max(0, i - 1)) % RING, ib = (r.head + i) % RING;
+  out.t = t;
+  if (ia === ib || t >= r.t[ib]) {
+    out.pos[0] = r.p[ib * 3]; out.pos[1] = r.p[ib * 3 + 1]; out.pos[2] = r.p[ib * 3 + 2];
+    out.yaw = r.yaw[ib]; out.pitch = r.pitch[ib]; out.flags = r.flags[ib];
+    return true;
+  }
+  const k = Math.max(0, Math.min(1, (t - r.t[ia]) / (r.t[ib] - r.t[ia])));
+  let dy = r.yaw[ib] - r.yaw[ia];
   if (dy > Math.PI) dy -= TAU; else if (dy < -Math.PI) dy += TAU;
-  return {
-    t,
-    pos: [0, 1, 2].map(j => a.pos[j] + (b.pos[j] - a.pos[j]) * k) as V3,
-    yaw: a.yaw + dy * k,
-    pitch: a.pitch + (b.pitch - a.pitch) * k,
-    flags: b.flags,
-  };
+  for (let j = 0; j < 3; j++) out.pos[j] = r.p[ia * 3 + j] + (r.p[ib * 3 + j] - r.p[ia * 3 + j]) * k;
+  out.yaw = r.yaw[ia] + dy * k;
+  out.pitch = r.pitch[ia] + (r.pitch[ib] - r.pitch[ia]) * k;
+  out.flags = r.flags[ib];
+  return true;
 }

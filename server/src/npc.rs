@@ -2,7 +2,7 @@
 use crate::level::{LinePoint, V3};
 
 pub const NAMES: [&str; 16] = ["KOBALT", "MIRA", "DUSK", "VANTA", "JUNO", "RIFT", "HALCYON", "SABLE", "ORRIN", "LYRA", "TESSERACT", "NOVA", "ZEPHYR", "IRIS", "CINDER", "PIXEL"];
-pub const LINES: [&str; 12] = ["gg", "nice line", "who put a skull on my wall", "that helix is cursed", "ok THAT was clean", "lol", "brb painting", "someone beat the ghost already", "serpent island is mine", "the drop never gets old", "ez", "wall's mine now"];
+pub const LINES: [&str; 12] = ["gg", "nice line", "who put a skull on my wall", "the spiral is cursed", "ok THAT was clean", "lol", "brb painting", "someone beat the ghost already", "long gap or nothing", "that speed gap never gets old", "ez", "wall's mine now"];
 
 pub struct Npc {
     pub idx: usize, // index into the line

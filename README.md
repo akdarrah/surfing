@@ -1,8 +1,8 @@
 # Sky Surf — Meridian
 
-Counter-Strike surf, reborn as a browser racing game. Every two minutes everyone on the server launches together and surfs the same six-stage course of curved ramps, a spiral around a tower and a drop onto one huge ramp, thousands of units above a sea of cloud, with floating rocks, distant megastructures and giant creatures drifting through the scenery. Dotted around the course are **spray walls**: reach one, press `T`, and your spray stays on it for everyone until someone else paints over it. The best ones are off the racing line: a floating island beside a bend, a crown you jump onto from the top of the spiral, a ledge under the drop, a column past the finish you only reach by carrying speed through the line. The server record run is rendered as a ghost glider so there is always a second to shave.
+Counter-Strike surf, reborn as a browser racing game. You are a **hovering sailboat** with your spray on the sail. Every two minutes everyone on the server launches together and surfs the same course, built the way classic surf maps are: short ramps, real gaps you need speed to clear, and two forks where a risky fast line and a safe one split and rejoin. The whole thing floats above a sea of cloud in a clean cream-and-blue toy look, with a **robot colossus** standing waist-deep in the clouds beside the course, head turning to follow the leader. Dotted around are **spray walls**: reach one, press `T`, and your spray stays on it for everyone until someone paints over it. The server record run is rendered as a ghost boat so there is always a second to shave.
 
-- **Client:** TypeScript, Three.js on **WebGPU** (automatic WebGL2 fallback) with bloom, ambient occlusion, motion blur, chromatic aberration, lens flare and a physical sky; synthesized audio; full-screen play.
+- **Client:** TypeScript, Three.js on **WebGPU** (automatic WebGL2 fallback). Default post stack is bloom + SMAA; ambient occlusion and motion blur are a High setting. Static level geometry is merged per section, clouds/islands/birds/wind are instanced and animated in the vertex shader, DPR is capped at 1.5 with adaptive render scale, and the frame loop allocates nothing. `F3` shows frame time, draw calls, triangles, physics time and heap. Synthesized audio; full-screen play.
 - **Server:** Rust (tokio + axum). One game-loop task owns all state; sockets talk to it over channels; 2,000 players on ~1 core.
 - **Physics:** the movement code is a port of Source's `gamemovement.cpp`, so it feels like CS surf; collision is Quake-style brush tracing with seam handling for curved ramps.
 - **Level:** `levels/build.mjs` walks the course with a turtle (`ramp`, `jump`, `land`, `bowl`, `fork`, `stage`, `wall`, `perch`), emitting mitered ramp prisms, the ideal racing line, trim strips, spray walls and both branches of every fork.
@@ -41,6 +41,8 @@ Tests:
 | `V` | first/third person |
 | `Tab` | scoreboard |
 | `F11` / `Alt+Enter` | full screen |
+| `Esc` | settings |
+| `F3` | performance overlay |
 
 Mouse sensitivity uses CS units (`sensitivity × 0.022°` per count).
 
@@ -51,7 +53,7 @@ Exactly two minutes, repeating:
 1. **Lobby (15 s)** — nobody can surf. A flythrough of the course, the previous round's podium, then 3-2-1-GO.
 2. **Race (1:45)** — everyone launches from the start pad at once. Leave the pad and your clock starts. Fall off and you restart the stage (with your speed gone). First valid finisher wins the round; late joiners race for a personal time but can't place.
 
-Joining asks for a callsign (anything up to 24 characters) and a spray: eight built-ins (skull, bolt, flame, GG, cat, smiley, crossed boards, SURF) or upload your own PNG. Sprays are re-encoded in the browser to 128×128 and served content-addressed from `/img/<hash>`.
+Joining asks for two things, a callsign (anything up to 24 characters) and a spray: eight built-ins (skull, bolt, flame, GG, cat, smiley, crossed boards, SURF) or upload your own PNG. Sprays are re-encoded in the browser to 128×128 and served content-addressed from `/img/<hash>`. Everything else (sensitivity, music, effects, quality, hide sprays, change spray, mutes) lives in the settings overlay: press `Esc` in game, or the gear button.
 
 ## Spray walls
 
